@@ -6,10 +6,10 @@ name: Build free-threaded CPython for wasm
 # add the new wasm 3.15t CI build job"). It does not touch wasm.yml or the runtime the
 # wasmJs suite uses. See docs/platforms/free-threaded-wasm.md.
 #
-# Experiment choices (agent proposal, not decisions): Emscripten defaults to the version
-# CPython itself pins (Platforms/emscripten/config.toml, 4.0.19 for 3.15.0), not the 5.0.3
-# of python-multiplatform/scripts/wasm/build-cpython.sh; the compile/link flags are the
-# #175 investigation's; the call trampoline is patched to fall back to its JS path under
+# Emscripten defaults to 5.0.3, the version of python-multiplatform/scripts/wasm/build-cpython.sh
+# and pypackpack #82 (Leader 2026-11-26, Decision 10 (b) b1 in the team report pmp-binder.md: "b1 approved (one Emscripten 5.0.3 for PMP wasm and pypackpack #82)"; evidence: run 45623531263, green on
+# 5.0.3), not the 4.0.19 CPython pins in Platforms/emscripten/config.toml. Experiment choices
+# (agent proposal, not decisions): the compile/link flags are the #175 investigation's; the call trampoline is patched to fall back to its JS path under
 # shared memory (trampoline_patch=skip runs without it).
 
 on:
@@ -22,7 +22,7 @@ on:
         required: true
         type: string
       emscripten_version:
-        description: Emscripten to use (empty = the version CPython pins in Platforms/emscripten/config.toml)
+        description: Emscripten to use (empty = 5.0.3, the default in build-wasm.sh)
         default: ""
         required: false
         type: string
@@ -82,7 +82,7 @@ jobs:
           [ -d "$root" ] || { echo "no unpacked archive under $FT_WORK/wasm-check"; exit 1; }
           log="$FT_WORK/embed-probe.log"
           set +e
-          timeout 600 node .github/scripts/ft-wasm/embed-probe.mjs "$root" > "$log" 2>&1
+          timeout 600 node python-multiplatform/scripts/wasm/embed-probe.mjs "$root" > "$log" 2>&1
           rc=$?
           set -e
           cat "$log"

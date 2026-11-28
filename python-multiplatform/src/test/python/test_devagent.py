@@ -130,6 +130,49 @@ class Authentication(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 devagent.parse_request(bad)
 
+    def test_with_the_variable_unset_the_marker_is_the_request(self):
+        marker = os.path.join(tempfile.mkdtemp(), "python_multiplatform_devagent.enable")
+        with open(marker, "w") as f:
+            f.write(f"port=4719;token={TOKEN}\n")
+        self.assertEqual(f"port=4719;token={TOKEN}", devagent.request_text(None, marker))
+        self.assertEqual(f"port=4719;token={TOKEN}", devagent.request_text("", marker))
+        self.assertEqual(
+            {"port": 4719, "token": TOKEN, "overlay": None}, devagent.parse_request(devagent.request_text(None, marker))
+        )
+
+    def test_the_variable_wins_over_the_marker(self):
+        marker = os.path.join(tempfile.mkdtemp(), "python_multiplatform_devagent.enable")
+        with open(marker, "w") as f:
+            f.write(f"port=4719;token={TOKEN}")
+        self.assertEqual(f"port=5000;token={TOKEN}", devagent.request_text(f"port=5000;token={TOKEN}", marker))
+
+    def test_an_empty_or_missing_marker_means_no_agent(self):
+        directory = tempfile.mkdtemp()
+        marker = os.path.join(directory, "python_multiplatform_devagent.enable")
+        self.assertIsNone(devagent.request_text(None, marker), "a missing marker")
+        self.assertIsNone(devagent.request_text(None, None), "no marker path")
+        with open(marker, "w") as f:
+            f.write(" \n")
+        self.assertIsNone(devagent.request_text(None, marker), "a blank marker")
+        saved = os.environ.pop(devagent.ENVIRONMENT_VARIABLE, None)
+        try:
+            self.assertIsNone(devagent.start_from_env(marker))
+        finally:
+            if saved is not None:
+                os.environ[devagent.ENVIRONMENT_VARIABLE] = saved
+
+    def test_a_marker_with_a_short_token_is_refused(self):
+        marker = os.path.join(tempfile.mkdtemp(), "python_multiplatform_devagent.enable")
+        with open(marker, "w") as f:
+            f.write(f"port=4719;token={TOKEN[: devagent.MIN_TOKEN_LENGTH - 1]}")
+        saved = os.environ.pop(devagent.ENVIRONMENT_VARIABLE, None)
+        try:
+            with self.assertRaises(ValueError):
+                devagent.start_from_env(marker)
+        finally:
+            if saved is not None:
+                os.environ[devagent.ENVIRONMENT_VARIABLE] = saved
+
     def test_a_short_token_is_refused_before_anything_listens(self):
         short = TOKEN[: devagent.MIN_TOKEN_LENGTH - 1]
         with self.assertRaises(ValueError):

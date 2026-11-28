@@ -106,13 +106,19 @@ class KlibKnmScannerTest {
         assertEquals("kotlinx.coroutines.Dispatchers", dispatchersIo.receiverTypeName)
         assertEquals("OBJECT", dispatchersIo.returnTag)
 
-        if (konanStdlibKlib.isDirectory) {
-            val mathEntries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
-            val powDouble = mathEntries.single { it.name == "kotlin.math.pow__Double_Double" }
-            assertEquals("kotlin.Double", powDouble.receiverTypeName)
-            assertEquals(listOf(RECEIVER_PARAMETER_NAME, "x"), powDouble.paramNames)
-            assertEquals(listOf("import kotlin.math.pow as artifact_ext_kotlin_math_pow"), powDouble.imports)
+    }
+
+    /** Split out of the coroutines test above so that a machine without a `.konan` cache reports a skip, not a pass. */
+    @Test
+    fun knmRecoversAnExtensionReceiverOnTheKonanStdlib() {
+        if (!konanStdlibKlib.isDirectory) {
+            python.multiplatform.gradle.artifact.ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
+        val mathEntries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
+        val powDouble = mathEntries.single { it.name == "kotlin.math.pow__Double_Double" }
+        assertEquals("kotlin.Double", powDouble.receiverTypeName)
+        assertEquals(listOf(RECEIVER_PARAMETER_NAME, "x"), powDouble.paramNames)
+        assertEquals(listOf("import kotlin.math.pow as artifact_ext_kotlin_math_pow"), powDouble.imports)
     }
 
     @Test
@@ -222,6 +228,123 @@ class KlibKnmScannerTest {
             "{ args -> ((fixture.compose.measure(androidx.compose.ui.unit.Dp((args[0] as Double).toFloat()), (args[1] as androidx.compose.ui.graphics.Color))).value).toDouble() }",
             callable.lambdaBody,
         )
+    }
+
+    /**
+     * #191: a nullable value-class parameter binds. Material3's `Text(fontStyle: FontStyle? = null,
+     * textAlign: TextAlign? = null, ...)` was declined on Kotlin/Native for it ("no boundary type for
+     * parameter FontStyle?"), so `from androidx.compose.material3 import Text` failed (batch run
+     * 44980924060). A value class Python can build from a primitive (`Dp?`) takes the primitive or
+     * `None`; one it cannot (`Color?` here, `TextAlign?` in Compose) takes its boxed handle or `None`.
+     * Red before: no candidate callable (declined).
+     */
+    @Test
+    fun knmBindsNullableValueClassParametersAsPrimitiveOrHandle() {
+        val nr = KnmTestNameResolver(
+            strings = listOf("value", "<init>", "dp", "color", "measure"),
+            classes = listOf(
+                "kotlin/Float",
+                "kotlin/Long",
+                "kotlin/Int",
+                "kotlin/Unit",
+                "androidx/compose/ui/unit/Dp",
+                "androidx/compose/ui/graphics/Color",
+            ),
+        )
+        val tt = TypeTable(ProtoBuf.TypeTable.getDefaultInstance())
+        val floatType = ProtoBuf.Type.newBuilder().setClassName(0).setNullable(false).build()
+        val longType = ProtoBuf.Type.newBuilder().setClassName(1).setNullable(false).build()
+        val publicFlags = Flags.VISIBILITY.toFlags(ProtoBuf.Visibility.PUBLIC)
+        val privateFlags = Flags.VISIBILITY.toFlags(ProtoBuf.Visibility.PRIVATE)
+        val valueClassFlags = publicFlags or
+            Flags.CLASS_KIND.toFlags(ProtoBuf.Class.Kind.CLASS) or
+            Flags.MODALITY.toFlags(ProtoBuf.Modality.FINAL) or
+            Flags.IS_VALUE_CLASS.toFlags(true)
+
+        val dpProto = ProtoBuf.Class.newBuilder()
+            .setFlags(valueClassFlags)
+            .setFqName(4)
+            .setInlineClassUnderlyingPropertyName(0)
+            .setInlineClassUnderlyingType(floatType)
+            .addConstructor(
+                ProtoBuf.Constructor.newBuilder()
+                    .setFlags(publicFlags)
+                    .addValueParameter(ProtoBuf.ValueParameter.newBuilder().setName(0).setType(floatType)),
+            )
+            .addProperty(
+                ProtoBuf.Property.newBuilder()
+                    .setFlags(publicFlags)
+                    .setName(0)
+                    .setReturnType(floatType),
+            )
+            .build()
+
+        val colorProto = ProtoBuf.Class.newBuilder()
+            .setFlags(valueClassFlags)
+            .setFqName(5)
+            .setInlineClassUnderlyingPropertyName(0)
+            .setInlineClassUnderlyingType(longType)
+            .addConstructor(
+                ProtoBuf.Constructor.newBuilder()
+                    .setFlags(privateFlags)
+                    .addValueParameter(ProtoBuf.ValueParameter.newBuilder().setName(0).setType(longType)),
+            )
+            .addProperty(
+                ProtoBuf.Property.newBuilder()
+                    .setFlags(publicFlags)
+                    .setName(0)
+                    .setReturnType(longType),
+            )
+            .build()
+
+        val classes = mapOf(
+            "androidx.compose.ui.unit.Dp" to KlibKnmScanner.KnmClassRecord(
+                dottedName = "androidx.compose.ui.unit.Dp",
+                packageName = "androidx.compose.ui.unit",
+                relativeName = "Dp",
+                proto = dpProto,
+                nameResolver = nr,
+                typeTable = tt,
+            ),
+            "androidx.compose.ui.graphics.Color" to KlibKnmScanner.KnmClassRecord(
+                dottedName = "androidx.compose.ui.graphics.Color",
+                packageName = "androidx.compose.ui.graphics",
+                relativeName = "Color",
+                proto = colorProto,
+                nameResolver = nr,
+                typeTable = tt,
+            ),
+        )
+
+        val unitType = ProtoBuf.Type.newBuilder().setClassName(3).setNullable(false).build()
+        val nullableDp = ProtoBuf.Type.newBuilder().setClassName(4).setNullable(true).build()
+        val nullableColor = ProtoBuf.Type.newBuilder().setClassName(5).setNullable(true).build()
+        val styleFn = ProtoBuf.Function.newBuilder()
+            .setFlags(publicFlags or Flags.MEMBER_KIND.toFlags(ProtoBuf.MemberKind.DECLARATION))
+            .setName(4)
+            .setReturnType(unitType)
+            .addValueParameter(ProtoBuf.ValueParameter.newBuilder().setName(2).setType(nullableDp))
+            .addValueParameter(ProtoBuf.ValueParameter.newBuilder().setName(3).setType(nullableColor))
+            .build()
+
+        val candidate = assertNotNull(
+            KlibKnmScanner.functionCandidateOrNull(
+                fn = styleFn,
+                owner = "fixture.compose",
+                callOwner = "fixture.compose",
+                ownerIsClass = false,
+                nr = nr,
+                tt = tt,
+                classes = classes,
+            ),
+        )
+        val callable = assertNotNull(candidate.callable, candidate.declaration.declineReason)
+        assertEquals(listOf("FLOAT", "OBJECT"), callable.paramTags)
+        assertTrue(
+            "((args[0])?.let { present -> androidx.compose.ui.unit.Dp((present as Double).toFloat()) })" in callable.lambdaBody,
+            callable.lambdaBody,
+        )
+        assertTrue("(args[1] as androidx.compose.ui.graphics.Color?)" in callable.lambdaBody, callable.lambdaBody)
     }
 
     @Test

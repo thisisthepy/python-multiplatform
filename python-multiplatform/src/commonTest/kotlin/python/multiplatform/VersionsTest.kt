@@ -15,10 +15,10 @@ import kotlin.test.assertTrue
  *
  * These assertions are written against the per-platform [embedsFreeThreadedPython] rather than
  * hard-coding one flavour, because the flavour differs by platform: desktop, Android,
- * androidNative and iOS embed 3.15t (issues #158, #328), wasm a GIL build until #175. The platform
+ * androidNative, iOS and wasm embed 3.15t (issues #158, #328, #175). The platform
  * test source sets pin the literal value for their platform (`DesktopFreeThreadedBuildTest`,
  * `DesktopNativeFreeThreadedBuildTest`, `AndroidFreeThreadedBuildTest`,
- * `AndroidNativeFreeThreadedBuildTest`, `IosFreeThreadedBuildTest`, `WasmGilBuildTest`), which is
+ * `AndroidNativeFreeThreadedBuildTest`, `IosFreeThreadedBuildTest`, `WasmFreeThreadedBuildTest`), which is
  * what a wrong actual would fail.
  */
 class VersionsTest {

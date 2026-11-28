@@ -1,4 +1,4 @@
-// Boots the CPython 3.14.2 Emscripten build and re-exports its raw wasm functions as ES module
+// Boots the free-threaded CPython 3.15.0 Emscripten build (3.15t with pthreads, #175) and re-exports its raw wasm functions as ES module
 // bindings, which is the shape `@WasmImport(module, name)` resolves against.
 //
 // Two settings in CPython's link line make this possible, neither of them in PEP 783's
@@ -11,7 +11,7 @@
 // with a missing named export fails the whole import, which would take out every call rather than
 // the one that is actually absent.
 
-import { PYTHON_DIR, STDLIB_ZIP_URL } from "./cpython-config.mjs";
+import { PYTHON_DIR, STDLIB_ZIP_URL, SHARED_MEMORY } from "./cpython-config.mjs";
 
 // Two hosts, and the difference is the *filesystem*, not the call path. Under Node the stdlib is
 // reached through NODEFS against the real build directory; in a browser there is no such thing, so
@@ -95,10 +95,14 @@ function installStdlibZip(Module, bytes) {
     const versionInt = Module.HEAPU32[Module._Py_Version >>> 2];
     const major = (versionInt >>> 24) & 0xff;
     const minor = (versionInt >>> 16) & 0xff;
+    // getpath's landmark carries the ABI thread flag: lib/python315t.zip and lib/python3.15t for the
+    // free-threaded build, lib/python315.zip for a GIL one. Py_Version does not say which, so the
+    // flag is read off the staged zip's name (python3.15t.zip), which the build names after it.
+    const abiThread = /t\.zip$/.test(String(STDLIB_ZIP_URL)) ? "t" : "";
     // Without this, getpath complains that it cannot find exec-prefix. It is a marker directory
     // only; this build has no dynamically loaded stdlib extensions.
-    Module.FS.mkdirTree(`/lib/python${major}.${minor}/lib-dynload/`);
-    Module.FS.writeFile(`/lib/python${major}${minor}.zip`, new Uint8Array(bytes), { canOwn: true });
+    Module.FS.mkdirTree(`/lib/python${major}.${minor}${abiThread}/lib-dynload/`);
+    Module.FS.writeFile(`/lib/python${major}${minor}${abiThread}.zip`, new Uint8Array(bytes), { canOwn: true });
 }
 
 // The Node settings. NODEFS still mounts the real filesystem -- tests reach host paths through it --
@@ -190,6 +194,26 @@ function browserSettings() {
         },
     };
 }
+
+// SPEC T-8: a runtime with a shared memory (the free-threaded pthreads build) needs
+// SharedArrayBuffer, which a browser grants only to a cross-origin isolated page. Without this check
+// the Emscripten glue fails later with an error that does not name the cause, so the start-up stops
+// here with one that does. Node has no such restriction, and a runtime without a shared memory (the
+// GIL build) never needs it, so neither is checked. Exported for WasmCrossOriginIsolationTest, which
+// runs under Node and so can reach the browser cases only through this function.
+export function crossOriginIsolationError(isNode, sharedMemory, isolated) {
+    if (isNode || !sharedMemory || isolated === true) return null;
+    return "python-multiplatform: this page is not cross-origin isolated (crossOriginIsolated is " +
+        String(isolated) + "), and the free-threaded CPython runtime needs a shared memory, which " +
+        "the browser grants only to an isolated page. Serve the page with the headers " +
+        "Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp " +
+        "(or credentialless). A host that cannot set headers can use a service worker that adds them " +
+        "(the coi-serviceworker approach). Embedding in a third-party iframe, popup-based sign-in or " +
+        "payment, and cross-origin resources without CORP or CORS headers are limited by isolation.";
+}
+
+const coiError = crossOriginIsolationError(IS_NODE, SHARED_MEMORY, globalThis.crossOriginIsolated);
+if (coiError !== null) throw new Error(coiError);
 
 const M = await EmscriptenModule(IS_NODE ? await nodeSettings() : browserSettings());
 
@@ -577,7 +601,10 @@ function readCString(ptr) {
     const heap = new Uint8Array(M.wasmMemory.buffer);
     let end = ptr;
     while (heap[end] !== 0) end++;
-    return decoder.decode(heap.subarray(ptr, end));
+    // slice, not subarray: the memory is a SharedArrayBuffer on the 3.15t pthreads build, and a
+    // browser's TextDecoder rejects a view of shared memory ("must not be shared"); node accepts it,
+    // so only wasmJsBrowserTest saw this. The copy is the length of one C name.
+    return decoder.decode(heap.slice(ptr, end));
 }
 
 export function pmpRegisterUpcall(namePtr) {
@@ -595,6 +622,27 @@ export function pmpRegisterUpcall(namePtr) {
     } catch (e) {
         return -3;
     }
+}
+
+// Upcalls from Python threads (#175 step 2). A free-threaded runtime built with the `_pm_upcall`
+// module (python-multiplatform/scripts/wasm/_pm_upcall.c) exports a dispatcher whose table index is the
+// same in every pthread Worker; an index from pmpRegisterUpcall exists only in the main thread's
+// table. Optional, so -1 (and a no-op) on a runtime without it, which keeps today's direct entry.
+export function pmpUpcallDispatchIndex() {
+    return typeof E.pm_upcall_dispatch_index === "function" ? E.pm_upcall_dispatch_index() : -1;
+}
+
+export function pmpUpcallSetTarget(index) {
+    if (typeof E.pm_upcall_set_target === "function") E.pm_upcall_set_target(index);
+}
+
+// The proxy type's slot dispatchers (0 traverse, 1 clear, 2 dealloc), on the same terms.
+export function pmpProxySlotDispatchIndex(slot) {
+    return typeof E.pm_proxy_slot_index === "function" ? E.pm_proxy_slot_index(slot) : -1;
+}
+
+export function pmpProxySetSlotTarget(slot, index) {
+    if (typeof E.pm_proxy_set_slot_target === "function") E.pm_proxy_set_slot_target(slot, index);
 }
 
 export function pmpCallVisit(fp, obj, arg) {

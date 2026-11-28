@@ -17,6 +17,7 @@ import kotlin.metadata.isSuspend
 import kotlin.metadata.isValue
 import kotlin.metadata.jvm.JvmMethodSignature
 import kotlin.metadata.jvm.KotlinClassMetadata
+import kotlin.metadata.jvm.annotations
 import kotlin.metadata.jvm.signature
 import kotlin.metadata.visibility
 import org.objectweb.asm.tree.AnnotationNode
@@ -73,9 +74,27 @@ internal class ArtifactClasspath(roots: List<File>) {
 
     /** @param binaryName e.g. `androidx/compose/ui/unit/Dp` -- no `.class` suffix. */
     fun classNode(binaryName: String): ClassNode? = nodeCache.getOrPut(binaryName) {
-        val root = locationsByBinaryName[binaryName] ?: return@getOrPut null
+        val root = locationsByBinaryName[binaryName] ?: return@getOrPut jdkClassNodeOrNull(binaryName)
         val bytes = readBytes(root, binaryName) ?: return@getOrPut null
         readClassNodeOrNull(bytes)
+    }
+
+    /**
+     * A `java.*` class is in no jar a build resolves: it is the JDK's. Without this, every Kotlin
+     * declaration whose type expands to one was declined as "not nameable", which is how
+     * `kotlinx.coroutines.Job.cancel(cause: CancellationException? = null)` went missing:
+     * `kotlinx.coroutines.CancellationException` is a typealias of
+     * `java.util.concurrent.CancellationException` (#164 item 4). Only `java/` is read, the
+     * public, stable API every desktop JDK carries; `sun.*`, `jdk.*` and `javax.*` stay declined.
+     * The bytes come from the JDK running the walk, through the platform class loader's resources.
+     */
+    private fun jdkClassNodeOrNull(binaryName: String): ClassNode? {
+        if (!binaryName.startsWith("java/")) return null
+        val bytes = ClassLoader.getPlatformClassLoader().getResourceAsStream("$binaryName.class")
+            ?.use { it.readBytes() }
+            ?: ClassLoader.getSystemResourceAsStream("$binaryName.class")?.use { it.readBytes() }
+            ?: return null
+        return readClassNodeOrNull(bytes)
     }
 
     private fun readBytes(root: File, binaryName: String): ByteArray? = if (root.isDirectory) {
@@ -268,6 +287,10 @@ internal fun resolveKotlinBoundary(
         // here has asked for it and `None` would then be a value the declaration refuses.
         if (classifier.name == KOTLIN_ANY) return ResolvedBoundary(NULLABLE_ANY_BOUNDARY, carrier = null)
     }
+    if (classifier.name == KOTLIN_NUMBER) {
+        val cast = "kotlin.Number" + if (type.isNullable) "?" else ""
+        return ResolvedBoundary(BoundaryType("OBJECT", "(%s as $cast)", "(%s)"), carrier = null)
+    }
 
     val info = if (type.isNullable) null else classpath.valueClassInfo(classifier.name)
     if (info != null) {
@@ -424,6 +447,40 @@ internal fun ArtifactClasspath.unreachableSupertypeOf(binaryName: String): Strin
     return null
 }
 
+/**
+ * The first type among [binaryName] and its supertypes (nearest first) annotated
+ * `@kotlin.coroutines.RestrictsSuspension`, as a qualified name; `null` when none is.
+ *
+ * A suspend member of such a type may be called only from a suspend lambda whose receiver is that
+ * very scope, so a generated `PendingCall.start { receiver.member() }` cannot compile ("Restricted
+ * suspending functions can invoke member or extension suspending functions only on their restricted
+ * coroutine scope"). The annotation has `BINARY` retention, so ASM reports it in
+ * `invisibleAnnotations`; both lists are read, as [ArtifactScanner]'s composable check does.
+ * The standard library's own `SequenceScope` is not on a fixture classpath, so it is named here.
+ */
+internal fun ArtifactClasspath.restrictsSuspensionTypeOf(binaryName: String): String? {
+    val visited = HashSet<String>()
+    val pending = ArrayDeque<String>()
+    pending.addLast(binaryName)
+    while (pending.isNotEmpty()) {
+        val name = pending.removeFirst()
+        if (!visited.add(name)) continue
+        if (name == "kotlin/sequences/SequenceScope") return name.replace('/', '.')
+        val node = classNode(name) ?: continue
+        val annotated = sequenceOf(node.visibleAnnotations, node.invisibleAnnotations).filterNotNull()
+            .any { list -> list.any { it.desc == RESTRICTS_SUSPENSION_DESCRIPTOR } }
+        if (annotated) return name.replace('/', '.').replace('$', '.')
+        listOfNotNull(node.superName).plus(node.interfaces.orEmpty()).forEach { pending.addLast(it) }
+    }
+    return null
+}
+
+private const val RESTRICTS_SUSPENSION_DESCRIPTOR = "Lkotlin/coroutines/RestrictsSuspension;"
+
+/** The decline reason for a suspend member of a restricted type. */
+internal const val RESTRICTED_SUSPEND_REASON =
+    "a suspend member of a @RestrictsSuspension type: callable only inside its own scope"
+
 private val ALWAYS_ON_A_KOTLIN_COMPILE_CLASSPATH = listOf("java/", "javax/", "jdk/", "sun/", "kotlin/")
 
 /**
@@ -492,13 +549,14 @@ private fun objectBoundaryTypeOrNull(type: KmType, classpath: ArtifactClasspath)
  * exists for, and one that surfaces as a compile failure of the *generated* file rather than as
  * anything the generator could notice.
  */
-private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, isArgument: Boolean = false): String? {
+internal fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, isArgument: Boolean = false): String? {
     val classifier = type.classifier as? KmClassifier.Class ?: return null
     // A type *argument* may be `kotlin.Any` -- which is what an unbounded type parameter becomes
     // (issue #38): `mutableStateOf`'s `policy: SnapshotMutationPolicy<T>` is written
     // `SnapshotMutationPolicy<kotlin.Any?>`. Only as an argument: at the top level a `kotlin.Any`
     // slot is [resolveKotlinBoundary]'s own decision, and it opens the nullable one only.
     if (isArgument && classifier.name == KOTLIN_ANY) return "kotlin.Any" + if (type.isNullable) "?" else ""
+    if (classifier.name == KOTLIN_NUMBER) return "kotlin.Number" + if (type.isNullable) "?" else ""
     if (!classpath.isNameablePublicClass(classifier.name)) return null
     val base = classifier.name.replace('/', '.')
     if (type.arguments.isEmpty()) return base + if (type.isNullable) "?" else ""
@@ -513,6 +571,9 @@ private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath, isA
 
 /** `kotlin.Any`, as `KmClassifier.Class` spells it. */
 internal const val KOTLIN_ANY = "kotlin/Any"
+
+/** `kotlin.Number`, as `KmClassifier.Class` spells it. A built-in mapped to `java.lang.Number` on JVM. */
+internal const val KOTLIN_NUMBER = "kotlin/Number"
 
 /** `kotlin.CharSequence`, as `KmClassifier.Class` spells it. A built-in: it has no class file. */
 internal const val KOTLIN_CHAR_SEQUENCE = "kotlin/CharSequence"
@@ -580,6 +641,71 @@ internal fun substitutableTypeParameterIds(parameters: List<KmTypeParameter>): S
  * copied. A replaced type keeps its own nullability, `suspend`-ness and arguments; a definitely-non-null
  * `T & Any` is declined, since `Any?` is exactly what it excludes.
  */
+/**
+ * Maps each class type parameter in [parameters] to its substitution type (`kotlin.Any?` when
+ * unbounded, or its single non-recursive upper bound) for SPEC U-4a, or returns `null` if any
+ * parameter is reified, has multiple upper bounds, or has a bound that mentions a type parameter
+ * (such as F-bounded `T : Comparable<T>`).
+ */
+internal fun substitutableClassTypeParameterMap(parameters: List<KmTypeParameter>): Map<Int, KmType>? {
+    val map = LinkedHashMap<Int, KmType>(parameters.size)
+    for (parameter in parameters) {
+        if (parameter.isReified) return null
+        when (parameter.upperBounds.size) {
+            0 -> map[parameter.id] = nullableAnyType()
+            1 -> {
+                val bound = parameter.upperBounds[0]
+                if (bound.mentionsTypeParameter()) return null
+                map[parameter.id] = bound
+            }
+            else -> return null
+        }
+    }
+    return map
+}
+
+/**
+ * [this] with every type parameter in [substitutions] replaced by its mapped [KmType], or `null`
+ * when it mentions a type parameter outside [substitutions].
+ */
+internal fun KmType.substituteTypeParameters(substitutions: Map<Int, KmType>): KmType? {
+    if (!mentionsTypeParameter()) return this
+    val own = classifier
+    if (own is KmClassifier.TypeParameter) {
+        val bound = substitutions[own.id] ?: return null
+        if (isDefinitelyNonNull && bound.isNullable) {
+            return bound.copyWithNullability(false)
+        }
+        if (isNullable && !bound.isNullable) {
+            return bound.copyWithNullability(true)
+        }
+        return bound
+    }
+    if (outerType != null) return null
+    val copy = KmType()
+    copy.classifier = own
+    copy.isNullable = isNullable
+    copy.isSuspend = isSuspend
+    copy.annotations += annotations
+    for (projection in arguments) {
+        val argument = projection.type
+        copy.arguments += if (argument == null) {
+            projection
+        } else {
+            KmTypeProjection(projection.variance, argument.substituteTypeParameters(substitutions) ?: return null)
+        }
+    }
+    return copy
+}
+
+private fun KmType.copyWithNullability(nullable: Boolean): KmType = KmType().also { copy ->
+    copy.classifier = classifier
+    copy.isNullable = nullable
+    copy.isSuspend = isSuspend
+    copy.annotations += annotations
+    copy.arguments += arguments
+}
+
 internal fun KmType.substituteAnyFor(ids: Set<Int>): KmType? {
     if (!mentionsTypeParameter()) return this
     val own = classifier
@@ -797,22 +923,37 @@ internal fun kotlinPackageNameOverrideOf(node: ClassNode): String? {
 internal fun kotlinClassifierNameOf(type: KmType): String? =
     (type.classifier as? KmClassifier.Class)?.name?.replace('/', '.')
 
-internal fun functionsOf(container: KmDeclarationContainer): List<ResolvedFunction> =
-    container.functions.mapNotNull { function -> resolvedFunctionOrNull(function) }
+internal fun functionsOf(
+    container: KmDeclarationContainer,
+    classTypeParameters: Map<Int, KmType> = emptyMap(),
+): List<ResolvedFunction> =
+    container.functions.mapNotNull { function -> resolvedFunctionOrNull(function, classTypeParameters) }
 
-private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
+private fun resolvedFunctionOrNull(
+    function: KmFunction,
+    classTypeParameters: Map<Int, KmType> = emptyMap(),
+): ResolvedFunction? {
     if (function.visibility != Visibility.PUBLIC) return null
     val signature = function.signature ?: return null
     val declaredReceiver = function.receiverParameterType
     val declaredParams = listOfNotNull(declaredReceiver) + function.valueParameters.map { it.type }
-    // Issue #38: an unbounded, non-reified type parameter is read as `kotlin.Any?`, and the call
-    // names it (`typeArgumentCount`). A declaration that cannot be substituted keeps its type
-    // parameters, and `declarationModelOf` declines it as it always did -- nothing changes for it.
-    val substitutable = substitutableTypeParameterIds(function.typeParameters)
-    val substituted = substitutable?.let { ids ->
-        val params = declaredParams.map { it.substituteAnyFor(ids) ?: return@let null }
-        val returns = function.returnType.substituteAnyFor(ids) ?: return@let null
-        params to returns
+    // Issue #38 & U-4a: unbounded, non-reified function type parameters are read as `kotlin.Any?`,
+    // and class type parameters are substituted using [classTypeParameters]. A declaration whose
+    // own type parameters cannot be substituted keeps them and is declined downstream.
+    val ownSubstitutable = substitutableTypeParameterIds(function.typeParameters)
+    val substituted = ownSubstitutable?.let { ids ->
+        val combined = if (ids.isEmpty()) {
+            classTypeParameters
+        } else {
+            classTypeParameters + ids.associateWith { nullableAnyType() }
+        }
+        if (combined.isEmpty()) {
+            declaredParams to function.returnType
+        } else {
+            val params = declaredParams.map { it.substituteTypeParameters(combined) ?: return@let null }
+            val returns = function.returnType.substituteTypeParameters(combined) ?: return@let null
+            params to returns
+        }
     }
     val allParams = substituted?.first ?: declaredParams
     val receiver = if (declaredReceiver != null) allParams.first() else null
@@ -829,7 +970,7 @@ private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
             function.valueParameters.map { it.declaresDefaultValue },
         isSuspend = function.isSuspend,
         typeArgumentCount = if (substituted != null) function.typeParameters.size else 0,
-        hasUnsubstitutableTypeParameters = function.typeParameters.isNotEmpty() && substituted == null,
+        hasUnsubstitutableTypeParameters = function.typeParameters.isNotEmpty() && ownSubstitutable == null,
         hasReifiedTypeParameter = function.typeParameters.any { it.isReified },
     )
 }

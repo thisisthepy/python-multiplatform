@@ -50,12 +50,65 @@ class Sized {
     fun size(extra: Int): Int = size + extra
 }
 
-/** Generic: its members are not bound yet. */
-class Box<T>(val item: T) {
+/** Unbounded generic: its members bind with `kotlin.Any?` substitution (SPEC U-4a). */
+class Box<T>(var item: T) {
     fun describe(): String = "box"
+    fun swap(next: T): T {
+        val prev = item
+        item = next
+        return prev
+    }
+}
+
+/** Single bindable upper bound: its members bind with `kotlin.Number` substitution (SPEC U-4a). */
+class NumberBox<T : Number>(var value: T) {
+    fun replace(next: T): T {
+        val prev = value
+        value = next
+        return prev
+    }
+}
+
+/** F-bounded generic: recursive upper bound is still declined (SPEC U-4a). */
+class ComparableBox<T : Comparable<T>>(val item: T) {
+    fun describeComparable(): String = item.toString()
 }
 
 /** An `object`'s members are #53's and stay bound as statics under the object's name. */
 object Registry {
     fun lookup(key: String): Int = key.length
+}
+
+/** The `Job.cancel(cause: CancellationException? = null)` shape: an interface member with a default. */
+interface Stoppable {
+    fun stop(reason: String? = null): String
+}
+
+fun newStoppable(): Stoppable = object : Stoppable {
+    override fun stop(reason: String?): String = reason ?: "none"
+}
+
+/** A member whose name a supertype also declares: leaving its argument out could resolve against either. */
+open class BasePing {
+    fun ping(times: Int = 1): Int = times
+}
+
+class DerivedPing : BasePing() {
+    fun ping(label: String = "x"): String = label
+}
+
+/** The `CornerBasedShape.copy` shape: an override inherits the defaults of the declaration it overrides. */
+abstract class Outline {
+    abstract fun reshape(start: Int = 0, end: Int = 0): Outline
+
+    fun reshape(all: Int): Outline = reshape(all, all)
+}
+
+class Square : Outline() {
+    override fun reshape(start: Int, end: Int): Square = this
+}
+
+/** A suspend member with a default: its partial calls still run inside the pending call (SPEC U-5). */
+class Waiter {
+    suspend fun pause(times: Int = 1): Int = times
 }

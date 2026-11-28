@@ -18,18 +18,24 @@ import org.gradle.api.GradleException
  */
 
 /**
- * The `abi_version` of the description this generator reads: 2, the only value, and every other value (1 included) is
- * rejected. There are no deployed version 1 libraries, and the compiler in this repository (`typedpython/aot/library.py`)
- * writes 2 only, so no reader of version 1 is kept. Version 2 added the type `int_list` and its `lists` entry (#465;
- * leader decision 2026-11-16, not owner-confirmed).
+ * The `abi_version` of the description this generator reads: 3, the only value, and every other value is rejected. There
+ * are no deployed libraries of an earlier version, and the compiler in this repository (`typedpython/aot/library.py`)
+ * writes 3 only, so no reader of an earlier version is kept. Version 2 added the type `int_list` and its `lists` entry
+ * (#465; leader decision 2026-11-16, not owner-confirmed); version 3 the dict types `dict_i64_i64`, `dict_i64_f64`,
+ * `dict_i64_bool` and the `dicts` object (#443, tier S2b; agent proposal, not owner-confirmed).
  */
-const val AOT_LIBRARY_ABI_VERSION = 2
+const val AOT_LIBRARY_ABI_VERSION = 3
 
 /** Out pointers of one function the per-thread scratch block of the helper holds (16 slots of 8 bytes). */
 const val AOT_MAX_RETURNS = 16
 
 /** The boundary vocabulary of `typedpython.aot.library.VOCABULARY`. */
-val AOT_LIBRARY_TYPES: List<String> = listOf("i64", "f64", "bool", "f64_list", "i64_list", "int_list")
+val AOT_LIBRARY_TYPES: List<String> = listOf(
+    "i64", "f64", "bool", "f64_list", "i64_list", "int_list", "dict_i64_i64", "dict_i64_f64", "dict_i64_bool",
+)
+
+/** The dict types of ABI version 3: the boundary type of the value of each (the keys are `i64`). */
+val AOT_DICT_VALUE: Map<String, String> = linkedMapOf("dict_i64_i64" to "i64", "dict_i64_f64" to "f64", "dict_i64_bool" to "bool")
 
 data class AotParam(val name: String, val type: String)
 
@@ -43,6 +49,12 @@ data class AotIntListSymbols(
     val new: String, val len: String, val get: String, val set: String, val retain: String, val release: String,
 )
 
+/** The eight C symbols of one dict type of ABI version 3 ([type] is one of [AOT_DICT_VALUE]'s keys). */
+data class AotDictSymbols(
+    val type: String, val new: String, val set: String, val get: String, val contains: String, val next: String,
+    val len: String, val retain: String, val release: String,
+)
+
 data class AotLibraryDescription(
     val prefix: String,
     val library: String,
@@ -53,6 +65,8 @@ data class AotLibraryDescription(
     val i64List: AotListSymbols,
     /** Present only when some signature of the library uses the type `int_list`. */
     val intList: AotIntListSymbols? = null,
+    /** One entry per dict type some signature uses (type name to symbols), in the order of [AOT_DICT_VALUE]. */
+    val dicts: Map<String, AotDictSymbols> = emptyMap(),
 )
 
 private fun fail(message: String): Nothing = throw GradleException(message)
@@ -95,6 +109,21 @@ fun parseAotLibraryDescription(json: String): AotLibraryDescription {
         )
     }
 
+    val rawDicts = root["dicts"]?.let { it as? Map<*, *> ?: fail("\"dicts\" of the AOT library description is not an object") }
+    val dicts = linkedMapOf<String, AotDictSymbols>()
+    for ((type, value) in AOT_DICT_VALUE) {
+        val entry = rawDicts?.get(type) ?: continue
+        val e = entry as? Map<*, *> ?: fail("\"$type\" under \"dicts\" is not an object")
+        if (text(e, "key", type) != "i64" || text(e, "value", type) != value) {
+            fail("\"$type\" under \"dicts\" has the key ${e["key"]} and the value ${e["value"]}, not i64 and $value")
+        }
+        dicts[type] = AotDictSymbols(
+            type, text(e, "new", type), text(e, "set", type), text(e, "get", type), text(e, "contains", type),
+            text(e, "next", type), text(e, "len", type), text(e, "retain", type), text(e, "release", type),
+        )
+    }
+    rawDicts?.keys?.firstOrNull { it !in AOT_DICT_VALUE }?.let { fail("\"dicts\" has the unknown type `$it`") }
+
     val rawFunctions = root["functions"] as? List<*> ?: fail("the AOT library description has no \"functions\" array")
     val functions = rawFunctions.map { raw ->
         val f = raw as? Map<*, *> ?: fail("an entry of \"functions\" is not an object")
@@ -116,6 +145,10 @@ fun parseAotLibraryDescription(json: String): AotLibraryDescription {
         }
         AotFunction(name, text(f, "symbol", "function `$name`"), params, returns)
     }
+    for (f in functions) {
+        val missing = (f.params.map { it.type } + f.returns).firstOrNull { it in AOT_DICT_VALUE && it !in dicts }
+        if (missing != null) fail("function `${f.name}` uses the type `$missing`, but the description has no \"$missing\" under \"dicts\"")
+    }
     if (intList == null) {
         for (f in functions) {
             if (f.params.any { it.type == "int_list" } || "int_list" in f.returns) {
@@ -132,6 +165,7 @@ fun parseAotLibraryDescription(json: String): AotLibraryDescription {
         f64List = listSymbols("f64_list"),
         i64List = listSymbols("i64_list"),
         intList = intList,
+        dicts = dicts,
     )
 }
 
@@ -156,12 +190,17 @@ private fun kotlinType(type: String): String = when (type) {
     "f64_list" -> "F64List"
     "i64_list" -> "I64List"
     "int_list" -> "IntList"
+    in AOT_DICT_VALUE -> aotDictClassName(type)
     else -> fail("unknown boundary type `$type`")
 }
 
+/** `DictI64I64`, `DictI64F64`, `DictI64Bool`: the Kotlin class of a dict type. */
+internal fun aotDictClassName(type: String): String =
+    type.split('_').joinToString("") { it.replaceFirstChar(Char::uppercaseChar) }
+
 /** The carrier letter of a parameter in the helper's descriptor strings: `J` long, `D` double, `B` byte (`uint8_t`). */
 internal fun aotCarrier(type: String): Char = when (type) {
-    "i64", "f64_list", "i64_list", "int_list" -> 'J'
+    "i64", "f64_list", "i64_list", "int_list", in AOT_DICT_VALUE -> 'J'
     "f64" -> 'D'
     "bool" -> 'B'
     else -> fail("unknown boundary type `$type`")
@@ -170,6 +209,131 @@ internal fun aotCarrier(type: String): Char = when (type) {
 /** The descriptor of an exported function's symbol: its parameters, then one `J` per out pointer, returning the `I` status. */
 internal fun aotDescriptor(f: AotFunction): String =
     "(" + f.params.joinToString("") { aotCarrier(it.type).toString() } + "J".repeat(f.returns.size) + ")I"
+
+/** A GraalVM foreign downcall descriptor in carrier names (`long`, `double`, `byte`, `int`, `void`). */
+data class AotForeignDescriptor(val returnType: String, val parameterTypes: List<String>)
+
+private fun carrierName(code: Char): String = when (code) {
+    'J' -> "long"
+    'D' -> "double"
+    'B' -> "byte"
+    'I' -> "int"
+    'V' -> "void"
+    else -> fail("unknown carrier type `$code`")
+}
+
+internal fun aotParseDescriptorSignature(signature: String): AotForeignDescriptor {
+    val close = signature.indexOf(')')
+    require(signature.startsWith("(") && close > 0 && close == signature.length - 2) {
+        "malformed descriptor signature `$signature`"
+    }
+    val params = signature.substring(1, close).map(::carrierName)
+    return AotForeignDescriptor(carrierName(signature[close + 1]), params)
+}
+
+/**
+ * Every distinct foreign downcall descriptor the generated `Handles` class of [d] binds, sorted deterministically
+ * (matching `GenerateReachabilityMetadata` in `python-multiplatform`).
+ */
+fun aotDowncallDescriptors(d: AotLibraryDescription): List<AotForeignDescriptor> {
+    val signatures = LinkedHashSet<String>()
+    signatures += "()I"      // init
+    signatures += "(JJ)I"    // last_error
+    signatures += "(J)J"     // f64_list / i64_list _new, _len, _data; int_list _new, _len
+    signatures += "(J)V"     // f64_list / i64_list / int_list _retain, _release
+    if (d.intList != null) {
+        signatures += "(JJJ)I" // int_list _get, _set
+    }
+    for (s in d.dicts.values) {
+        signatures += "()J"    // dict _new
+        signatures += "(JJ${aotCarrier(AOT_DICT_VALUE.getValue(s.type))})I"   // dict _set
+        signatures += "(JJJ)I" // dict _get
+        signatures += "(JJ)I"  // dict _contains
+        signatures += "(JJJJ)I" // dict _next
+    }
+    for (f in d.functions) {
+        signatures += aotDescriptor(f)
+    }
+    return signatures
+        .map(::aotParseDescriptorSignature)
+        .distinct()
+        .sortedWith(
+            compareBy<AotForeignDescriptor>(
+                { it.parameterTypes.size },
+                { it.returnType },
+                { it.parameterTypes.joinToString(",") },
+            ),
+        )
+}
+
+/** Classpath location where GraalVM native-image reads per-library reachability metadata automatically. */
+fun aotReachabilityMetadataPath(packageName: String, prefix: String): String =
+    "META-INF/native-image/$packageName/$prefix/reachability-metadata.json"
+
+/**
+ * The spelling GraalVM's foreign configuration parser accepts for a carrier type. It does not take Java type names:
+ * `MemoryLayoutParser` looks each name up in `Linker.nativeLinker().canonicalLayouts()` (bool, char, short, int, long,
+ * long long, float, double, void*, size_t, wchar_t) and only the return type may also be `void`
+ * (`ForeignFunctionsConfigurationParser`, sources shipped in the NIK as lib/svm/builder/svm-foreign.src.zip).
+ * `long long` is the 64-bit layout on every platform (`long` is 32-bit on Windows); `char` is `JAVA_BYTE`.
+ */
+internal fun aotGraalLayoutName(carrier: String): String = when (carrier) {
+    "long" -> "long long"
+    "double" -> "double"
+    "byte" -> "char"
+    "int" -> "int"
+    "void" -> "void"
+    else -> fail("unknown carrier type `$carrier`")
+}
+
+internal fun aotCarrierNameOfGraalLayout(layout: String): String = when (layout) {
+    "long long" -> "long"
+    "double" -> "double"
+    "char" -> "byte"
+    "int" -> "int"
+    "void" -> "void"
+    else -> fail("unknown GraalVM layout `$layout`")
+}
+
+/**
+ * GraalVM `reachability-metadata.json` for [d]: every foreign downcall descriptor bound by `Handles` and every
+ * `java.lang.foreign` reflection entry used once at link time by `AotFfmRuntime`.
+ */
+fun renderAotReachabilityMetadata(d: AotLibraryDescription): String = buildString {
+    val downcalls = aotDowncallDescriptors(d)
+    append("{\n")
+    append("  \"foreign\": {\n")
+    append("    \"downcalls\": [\n")
+    downcalls.forEachIndexed { index, desc ->
+        val params = desc.parameterTypes.joinToString(", ") { "\"${aotGraalLayoutName(it)}\"" }
+        val comma = if (index < downcalls.lastIndex) "," else ""
+        append("      { \"returnType\": \"${aotGraalLayoutName(desc.returnType)}\", \"parameterTypes\": [$params] }$comma\n")
+    }
+    append("    ]\n")
+    append("  },\n")
+    append("  \"reflection\": [\n")
+    val entries = listOf(
+        """    { "type": "java.lang.foreign.MemorySegment", "allPublicMethods": true, "allPublicFields": true }""",
+        """    { "type": "java.lang.foreign.Arena", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.Linker", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.Linker${'$'}Option", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.Linker${'$'}Option[]" }""",
+        """    { "type": "java.lang.foreign.SymbolLookup", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.FunctionDescriptor", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout", "allPublicMethods": true, "allPublicFields": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout${'$'}OfLong", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout${'$'}OfDouble", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.ValueLayout${'$'}OfByte", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.MemoryLayout", "allPublicMethods": true }""",
+        """    { "type": "java.lang.foreign.MemoryLayout[]" }""",
+    )
+    entries.forEachIndexed { index, entry ->
+        val comma = if (index < entries.lastIndex) "," else ""
+        append(entry).append(comma).append('\n')
+    }
+    append("  ]\n")
+    append("}\n")
+}
 
 internal fun aotResultClassName(functionName: String): String =
     functionName.split('_').filter { it.isNotEmpty() }.joinToString("") { it.replaceFirstChar(Char::uppercaseChar) } + "Result"
@@ -181,7 +345,9 @@ private fun validate(d: AotLibraryDescription, packageName: String, objectName: 
     if (!IDENTIFIER.matches(objectName) || objectName in KOTLIN_HARD_KEYWORDS) {
         fail("the object name `$objectName` is not a Kotlin identifier")
     }
-    if (objectName in setOf("F64List", "I64List", "IntList", "AotFfm", "AotFfmRuntime", "TypedPythonAotException")) {
+    if (objectName in setOf("F64List", "I64List", "IntList", "AotFfm", "AotFfmRuntime", "TypedPythonAotException") ||
+        objectName in AOT_DICT_VALUE.keys.map(::aotDictClassName)
+    ) {
         fail("the object name `$objectName` is one of the generated helper classes")
     }
     val seen = mutableSetOf<String>()
@@ -211,7 +377,8 @@ private const val GENERATED = "// GENERATED by python-multiplatform-gradle-plugi
 
 /**
  * The generated sources of one library, as relative file name to text: `AotFfm.kt` (the helper and the exception, the
- * same text for every library), `<objectName>.kt`, `F64List.kt` and `I64List.kt`, and `IntList.kt` only when the description has the `int_list` entry, all in
+ * same text for every library), `<objectName>.kt`, `F64List.kt` and `I64List.kt`, `IntList.kt` only when the description has the `int_list` entry,
+ * and `DictI64I64.kt` / `DictI64F64.kt` / `DictI64Bool.kt` for each entry of `dicts`, all in
  * [packageName].
  */
 fun renderAotLibraryBindings(d: AotLibraryDescription, packageName: String, objectName: String): Map<String, String> {
@@ -223,6 +390,7 @@ fun renderAotLibraryBindings(d: AotLibraryDescription, packageName: String, obje
         "I64List.kt" to renderAotList(packageName, objectName, "I64List", "i64", "Long", "LongArray", "Long", 8, "list[int]"),
     )
     if (d.intList != null) files["IntList.kt"] = renderAotIntList(packageName, objectName)
+    for (type in d.dicts.keys) files["${aotDictClassName(type)}.kt"] = renderAotDict(packageName, objectName, type)
     return files
 }
 
@@ -309,9 +477,45 @@ private fun renderAotObject(d: AotLibraryDescription, packageName: String, objec
         line("        val intListRetain: MethodHandle = rt.downcall(\"${s.retain}\", \"(J)V\")")
         line("        val intListRelease: MethodHandle = rt.downcall(\"${s.release}\", \"(J)V\")")
     }
+    for (s in d.dicts.values) {
+        val h = aotDictClassName(s.type).replaceFirstChar(Char::lowercaseChar)
+        val v = aotCarrier(AOT_DICT_VALUE.getValue(s.type))
+        line("        val ${h}New: MethodHandle = rt.downcall(\"${s.new}\", \"()J\")")
+        line("        val ${h}Set: MethodHandle = rt.downcall(\"${s.set}\", \"(JJ$v)I\")")
+        line("        val ${h}Get: MethodHandle = rt.downcall(\"${s.get}\", \"(JJJ)I\")")
+        line("        val ${h}Contains: MethodHandle = rt.downcall(\"${s.contains}\", \"(JJ)I\")")
+        line("        val ${h}Next: MethodHandle = rt.downcall(\"${s.next}\", \"(JJJJ)I\")")
+        line("        val ${h}Len: MethodHandle = rt.downcall(\"${s.len}\", \"(J)J\")")
+        line("        val ${h}Retain: MethodHandle = rt.downcall(\"${s.retain}\", \"(J)V\")")
+        line("        val ${h}Release: MethodHandle = rt.downcall(\"${s.release}\", \"(J)V\")")
+    }
     for (f in d.functions) {
         line("        val f_${f.name}: MethodHandle = rt.downcall(\"${f.symbol}\", \"${aotDescriptor(f)}\")")
     }
+    line()
+    line("        fun handles(): Map<String, MethodHandle> = linkedMapOf(")
+    line("            \"aotInit\" to aotInit,")
+    line("            \"lastError\" to lastError,")
+    for (prefix in listOf("f64", "i64")) {
+        for (op in listOf("New", "Len", "Data", "Retain", "Release")) {
+            line("            \"${prefix}List$op\" to ${prefix}List$op,")
+        }
+    }
+    if (d.intList != null) {
+        for (op in listOf("New", "Len", "Get", "Set", "Retain", "Release")) {
+            line("            \"intList$op\" to intList$op,")
+        }
+    }
+    for (type in d.dicts.keys) {
+        val h = aotDictClassName(type).replaceFirstChar(Char::lowercaseChar)
+        for (op in listOf("New", "Set", "Get", "Contains", "Next", "Len", "Retain", "Release")) {
+            line("            \"$h$op\" to $h$op,")
+        }
+    }
+    for (f in d.functions) {
+        line("            \"f_${f.name}\" to f_${f.name},")
+    }
+    line("        )")
     line("    }")
     for (f in d.functions) {
         line()
@@ -332,7 +536,7 @@ private fun renderAotFunction(f: AotFunction): String {
         val n = aotKotlinName(it.name)
         when (it.type) {
             "bool" -> "(if ($n) 1 else 0).toByte()"
-            "f64_list", "i64_list", "int_list" -> "$n.pointer()"
+            "f64_list", "i64_list", "int_list", in AOT_DICT_VALUE -> "$n.pointer()"
             else -> n
         }
     } + f.returns.indices.map { if (it == 0) "__out" else "__out + ${it * 8}L" }
@@ -345,6 +549,7 @@ private fun renderAotFunction(f: AotFunction): String {
             "f64_list" -> "F64List.owned(__h, __h.rt.readLong($at))"
             "i64_list" -> "I64List.owned(__h, __h.rt.readLong($at))"
             "int_list" -> "IntList.owned(__h, __h.rt.readLong($at))"
+            in AOT_DICT_VALUE -> "${aotDictClassName(t)}.owned(__h, __h.rt.readLong($at))"
             else -> fail("unknown boundary type `$t`")
         }
     }
@@ -600,6 +805,140 @@ private fun renderAotIntList(packageName: String, objectName: String): String {
     line("            if (pointer == 0L) throw lib.rt.lastError(lib.lastError)")
     line("            return pointer")
     line("        }")
+    line("    }")
+    line("}")
+    return sb.toString()
+}
+
+/**
+ * `DictI64I64.kt` / `DictI64F64.kt` / `DictI64Bool.kt`: the Kotlin side of one dict handle of ABI version 3 (#443, tier
+ * S2b; agent proposal, not owner-confirmed). Read-only on the Kotlin side: a dict is made whole by [of], and the library
+ * never writes a dict that crosses its boundary, so no Kotlin code can race on one. Every access is a call into the
+ * library; a failure is the library's error record as a [TypedPythonAotException].
+ */
+private fun renderAotDict(packageName: String, objectName: String, type: String): String {
+    val cls = aotDictClassName(type)
+    val h = cls.replaceFirstChar(Char::lowercaseChar)
+    val value = AOT_DICT_VALUE.getValue(type)
+    val kt = kotlinType(value)
+    val py = when (value) {
+        "i64" -> "int"
+        "f64" -> "float"
+        else -> "bool"
+    }
+    val read = { at: String ->
+        when (value) {
+            "i64" -> "lib.rt.readLong($at)"
+            "f64" -> "lib.rt.readDouble($at)"
+            else -> "lib.rt.readByte($at).toInt() != 0"
+        }
+    }
+    val carry = { v: String -> if (value == "bool") "(if ($v) 1 else 0).toByte()" else v }
+    val sb = StringBuilder()
+    fun line(text: String = "") {
+        sb.append(text).append('\n')
+    }
+    line(GENERATED)
+    line("//")
+    line("// The Kotlin side of the library's counted `dict[int, $py]` handle (abi_version 3). Agent proposal, not owner-confirmed.")
+    line("@file:Suppress(\"unused\")")
+    line()
+    line("package $packageName")
+    line()
+    line("/**")
+    line(" * A `dict[int, $py]` of the compiled library, behind a counted handle: the items in their insertion order, as in Python.")
+    line(" *")
+    line(" * - Read-only here. Create one with `$cls.of(map)` (the items in the map's iteration order); a dict an exported function")
+    line(" *   returns is wrapped as an owned handle. The library never writes a dict that crosses its boundary (a function that")
+    line(" *   would is not exported), so one object may be read, and passed to calls, from several threads at once.")
+    line(" * - Every access is a call into the library. [get] of a missing key is null; a key or value outside 64 bits (an int")
+    line(" *   that grew inside the library) throws [TypedPythonAotException] with class `OverflowError`, from [get] and [toMap].")
+    line(" * - [close] gives up this object's ownership, once; calling it again does nothing. Use after [close] throws")
+    line(" *   [IllegalStateException]. An unclosed dict is not freed by the garbage collector (agent proposal).")
+    line(" *   A function that returns its argument gives a new object over the same native dict; each is closed on its own.")
+    line(" *   Do not call [close] while another thread is using the dict.")
+    line(" */")
+    line("class $cls private constructor(private val lib: $objectName.Handles, pointer: Long) : AutoCloseable {")
+    line("    private val owner = java.util.concurrent.atomic.AtomicLong(pointer)")
+    line()
+    line("    /** True once [close] has run. */")
+    line("    val isClosed: Boolean get() = owner.get() == 0L")
+    line()
+    line("    /** The native handle for a call; throws [IllegalStateException] when closed. */")
+    line("    internal fun pointer(): Long {")
+    line("        val p = owner.get()")
+    line("        if (p == 0L) throw IllegalStateException(\"$cls is closed\")")
+    line("        return p")
+    line("    }")
+    line()
+    line("    /** The number of items. */")
+    line("    val size: Int get() = Math.toIntExact(lib.${h}Len.invokeExact(pointer()) as Long)")
+    line()
+    line("    /** The value under [key], or null when there is none; `OverflowError` for an int value outside 64 bits. */")
+    line("    operator fun get(key: Long): $kt? {")
+    line("        val p = pointer()")
+    line("        val out = lib.rt.scratch()")
+    line("        val rc = lib.${h}Get.invokeExact(p, key, out) as Int")
+    line("        if (rc != 0) {")
+    line("            val e = lib.rt.lastError(lib.lastError)")
+    line("            if (e.className == \"KeyError\") return null")
+    line("            throw e")
+    line("        }")
+    line("        return ${read("out")}")
+    line("    }")
+    line()
+    line("    /** `key in d`. */")
+    line("    fun containsKey(key: Long): Boolean {")
+    line("        val rc = lib.${h}Contains.invokeExact(pointer(), key) as Int")
+    line("        if (rc < 0) throw lib.rt.lastError(lib.lastError)")
+    line("        return rc == 1")
+    line("    }")
+    line()
+    line("    /** A copy of the items in their order; `OverflowError` if a key or value does not fit in 64 bits. */")
+    line("    fun toMap(): Map<Long, $kt> {")
+    line("        val p = pointer()")
+    line("        val out = LinkedHashMap<Long, $kt>()")
+    line("        val s = lib.rt.scratch()")
+    line("        lib.rt.writeLong(s, 0L)")
+    line("        while (true) {")
+    line("            val rc = lib.${h}Next.invokeExact(p, s, s + 8L, s + 16L) as Int")
+    line("            if (rc == 0) return out")
+    line("            if (rc != 1) throw lib.rt.lastError(lib.lastError)")
+    line("            out[lib.rt.readLong(s + 8L)] = ${read("s + 16L")}")
+    line("        }")
+    line("    }")
+    line()
+    line("    /** Gives up this object's ownership of the native dict, once. */")
+    line("    override fun close() {")
+    line("        val p = owner.getAndSet(0L)")
+    line("        if (p != 0L) lib.${h}Release.invokeExact(p) as Unit")
+    line("    }")
+    line()
+    line("    override fun toString(): String = if (isClosed) \"$cls(closed)\" else \"$cls(size=\" + size + \")\"")
+    line()
+    line("    companion object {")
+    line("        /** A new dict holding the items of [items], in its iteration order. Needs the library loaded. */")
+    line("        fun of(items: Map<Long, $kt>): $cls {")
+    line("            val lib = $objectName.native()")
+    line("            val pointer = lib.${h}New.invokeExact() as Long")
+    line("            if (pointer == 0L) throw lib.rt.lastError(lib.lastError)")
+    line("            val dict = $cls(lib, pointer)")
+    line("            try {")
+    line("                for (item in items) {")
+    line("                    val k: Long = item.key")
+    line("                    val v: $kt = item.value")
+    line("                    val rc = lib.${h}Set.invokeExact(pointer, k, ${carry("v")}) as Int")
+    line("                    if (rc != 0) throw lib.rt.lastError(lib.lastError)")
+    line("                }")
+    line("            } catch (e: Throwable) {")
+    line("                dict.close()")
+    line("                throw e")
+    line("            }")
+    line("            return dict")
+    line("        }")
+    line()
+    line("        /** Wraps a handle the library returned: the caller owns one count of it. */")
+    line("        internal fun owned(lib: $objectName.Handles, pointer: Long): $cls = $cls(lib, pointer)")
     line("    }")
     line("}")
     return sb.toString()

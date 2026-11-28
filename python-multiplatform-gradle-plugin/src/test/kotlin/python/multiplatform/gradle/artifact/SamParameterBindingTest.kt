@@ -93,4 +93,54 @@ class SamParameterBindingTest {
         assertEquals(listOf("$pkg.NotFunctional"), keep.paramTypeNames)
         assertTrue("as $pkg.NotFunctional" in keep.lambdaBody, keep.lambdaBody)
     }
+
+    @Test
+    fun aGenericSuspendFunctionalInterfaceBindsAsSuspendSamSlot() {
+        val accept = callables().single { it.name == "$pkg.acceptCollector" }
+        assertEquals(
+            listOf("$pkg.AsyncCollector|kotlin.coroutines.SuspendFunction1(kotlin.Any)->kotlin.Unit"),
+            accept.paramTypeNames,
+        )
+        assertTrue("if (v is kotlin.Function2<*, *, *>)" in accept.lambdaBody, accept.lambdaBody)
+        assertTrue("$pkg.AsyncCollector<kotlin.Any?>" in accept.lambdaBody, accept.lambdaBody)
+    }
+
+    @Test
+    fun aSuspendSamTypeParameterNestedInTheMethodSignatureIsSubstitutedAtAnyDepth() {
+        // The same shape the KSP fixture `fixture.library.BatchSink` pins (review finding on #497):
+        // the walker substitutes `T` inside `Batch<T>` from the use site, so the SAM lambda's
+        // parameter type and the interface cast agree. The nested type is a fixture class rather
+        // than `List<T>`: the walker never writes a mapped Kotlin collection into generated source
+        // (`renderKotlinSourceType` needs a class file), so `List<T>` declines the whole slot.
+        // Passes before and after that fix; it is here so the two generators are checked against one shape.
+        val accept = callables().single { it.name == "$pkg.acceptBatches" }
+        assertEquals(
+            listOf("$pkg.BatchCollector|kotlin.coroutines.SuspendFunction1($pkg.Batch)->kotlin.Unit"),
+            accept.paramTypeNames,
+        )
+        assertTrue("$pkg.BatchCollector<kotlin.String>" in accept.lambdaBody, accept.lambdaBody)
+        assertTrue(
+            "(suspend ($pkg.Batch<kotlin.String>) -> kotlin.Unit)" in accept.lambdaBody,
+            accept.lambdaBody,
+        )
+    }
+    /**
+     * #164 item 4: a `java.*` parameter type is nameable although no walked jar holds its class file;
+     * it is read from the JDK running the walk. Red before: `cancelWith` was declined ("not nameable"),
+     * which is how `kotlinx.coroutines.Job.cancel` was missing from Python.
+     */
+    @Test
+    fun aJdkClassParameterSpelledThroughATypealiasIsBound() {
+        val cancel = callables().single { it.name == "$pkg.cancelWith" }
+        assertEquals(listOf("java.util.concurrent.CancellationException"), cancel.paramTypeNames)
+        assertTrue("as java.util.concurrent.CancellationException?" in cancel.lambdaBody, cancel.lambdaBody)
+    }
+
+    /** The JDK fallback is `java/` only: a `javax.*` parameter is still declined. Passes before and after. */
+    @Test
+    fun aJavaxClassParameterStaysDeclined() {
+        assertTrue(callables().none { it.name == "$pkg.takeJavaxName" })
+        val declined = declarations().single { it.simpleName == "takeJavaxName" }
+        assertTrue(declined.declineReason != null, "takeJavaxName should be declined")
+    }
 }

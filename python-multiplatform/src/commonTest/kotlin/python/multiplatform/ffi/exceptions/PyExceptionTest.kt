@@ -97,4 +97,45 @@ class PyExceptionTest {
         assertFalse(thrown.isCancelledError(), "ValueError must not be treated as a CancelledError")
         assertSame(thrown, thrown.toKotlinException())
     }
+
+    // ---- #524 item 1: PyException is an Exception, and its Python object is toPyObject() (owner, 2026-11-22) ----
+
+    @Test
+    fun anExceptionFromPythonAnswersTheOriginalInstanceAsItsPythonObject() = PythonTestFixture.withInterpreter {
+        val thrown = assertFailsWith<PyException> { Python3.exec("raise ValueError('from python')") }
+        val obj = thrown.toPyObject()
+        assertSame(thrown.value, obj, "toPyObject() of a Python exception must be the original instance")
+        assertEquals("from python", obj.toString())
+    }
+
+    @Test
+    fun anExceptionMadeInKotlinBecomesARuntimeErrorWithItsMessageOnce() = PythonTestFixture.withInterpreter {
+        val made = PyException("made in kotlin")
+        val obj = made.toPyObject()
+        assertEquals("made in kotlin", obj.toString())
+        assertEquals("RuntimeError", obj.Type.name)
+        assertSame(obj, made.toPyObject(), "a second call must answer the same Python object")
+    }
+
+    @Test
+    fun anExceptionMadeInKotlinWithATypeIsAnInstanceOfThatType() = PythonTestFixture.withInterpreter {
+        // The type of a KeyError instance: the KeyError class, as a PyType (owned by the cache).
+        val keyError = PythonTestFixture.eval("KeyError('probe')").Type
+        val obj = PyException("missing", type = keyError).toPyObject()
+        assertTrue(keyError.isInstance(obj), "expected an instance of KeyError, got ${obj.Type.name}")
+    }
+
+    // ---- #524 O-3a: a mirror class made in Kotlin is its built-in Python class (agent proposal) ----
+
+    @Test
+    fun aMirrorClassMadeInKotlinBecomesTheBuiltinClassItMirrors() = PythonTestFixture.withInterpreter {
+        val typeError = PyTypeError("bad element").toPyObject()
+        assertEquals("TypeError", typeError.Type.name)
+        assertEquals("bad element", typeError.toString())
+        val keyError = python.multiplatform.ffi.exceptions.errors.PyKeyError("k").toPyObject()
+        assertEquals("KeyError", keyError.Type.name)
+        // The type of a LookupError instance: the LookupError class.
+        val lookupError = PythonTestFixture.eval("LookupError('probe')").Type
+        assertTrue(lookupError.isInstance(keyError), "a KeyError made in Kotlin is still a LookupError in Python")
+    }
 }

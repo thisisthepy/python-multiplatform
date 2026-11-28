@@ -144,6 +144,471 @@ start early. Tier names are for this note only.
   CPython objects). Calls to Kotlin are typed direct calls, not object calls (section 8).
 - Enough for: wordfreq.
 
+#### 4.3.1 Tier S step 1 (PR-S1): strings
+
+Design for PR-S1 (agent proposal, written 2026-11-21 after the leader's order K5, M1, O1, O2, S1, S2, S3, T1 and the
+1.0 scope answer of the same day, "Start S1 right after the 1.0 items if time remains"; not owner-confirmed, leader
+review pending). Tier S is in 1.0 (owner, 2026-11-21 21:55: "191, 443, 175 전부 1.0에 넣어", relayed by the leader;
+the earlier "after 1.0" is withdrawn). This step changes nothing in a program that has no `str` value.
+
+**What a program can do with a `str` (the accepted subset of this step).**
+
+- Values: literals, `+`, `+=`, `*` by an int, `==` `!=` `<` `<=` `>` `>=` (code point order, as CPython), `len`,
+  indexing (`s[i]`, negative included), slicing (`s[a:b]`, `s[a:b:c]`, CPython's index adjustment), `in` / `not in`
+  (substring), iteration (`for ch in s`), the conditional expression, `str` locals, parameters, results, fields of a
+  class (an owned field, acyclic) and module constants.
+- Producers: `str(x)` and `repr(x)` of `int`, `float`, `bool` and `str` (the int and float formatters the kernel already
+  has). `repr` of a `str`, also what `{s!r}` uses: single quotes unless the string holds `'` and no `"`; escapes
+  `\\`, `\n`, `\r`, `\t`, the quote in use, and for a code point that is not printable (`str.isprintable`, from
+  the table below) `\xNN` below U+0100, `\uNNNN` below U+10000, `\UNNNNNNNN` above (observed:
+  `repr("\x7f\u00ad\U0001F600\n") == "'\\x7f\\xad\U0001F600\\n'"` with the emoji printed as itself); `chr`, `sys.argv[i]` (decoded as CPython decodes it: UTF-8 with `surrogateescape` on
+  POSIX, the UTF-16 `wmain` arguments on Windows, which the int parser already reads), f-strings anywhere (not only in
+  `print`), with `{s}`, `{s!r}`, `{x!r}` and the existing `{e}` / `{e:.Nf}`.
+- Consumers: `print` of a `str` (also with other values, `sep` and `end`), `sys.stdout.write` and `sys.stderr.write`
+  (their int result is the length, as CPython's text stream returns), `ord`, `int(s)` for any `str` (the parser of
+  `int(sys.argv[i])`, with the reference's `repr` of the string in the error message).
+- Methods (the list of section 4.3; any other is the compile error `aot/str-method`): `split()` / `split(sep)` /
+  `split(sep, maxsplit)`, `join`, `strip()` / `lstrip()` / `rstrip()` with and without a `chars` argument, `lower`,
+  `upper`, `startswith` / `endswith` (a `str` or a tuple of `str`, no `start` / `end` yet), `find` (no `start` / `end`
+  yet), `replace` (with and without `count`), `isalpha`, `isdigit`. `encode` waits for `bytes` (S2).
+- `list[str]` only as far as `split` and `join` need it, as the same runtime list type S2 generalises (a counted list
+  of owned `tpa_str *`, the shape of `tpa_i64_list`), so nothing is thrown away: a list display of `str`, `split`'s result, indexing, `len`,
+  iteration, `join`'s argument, a local or parameter. Growth (`append`, ...) is S2 with the other containers; a growing
+  use is `aot/container` (pending, tier S), as today.
+- Compile errors that stay: `is` / `is not` between two `str` operands (`aot/str-identity`: CPython's answer
+  depends on interning and constant folding, so a program that relies on it has no defined result to reproduce;
+  `s is None` / `s is not None` on a `str | None` stays accepted), `%` formatting and `str.format`
+  (`aot/str-format`, pending S2), a `str` argument or result of an `aot-lib` export (`aot/library-str`; the C-ABI
+  string kind is a later step with its own ABI version), and every method outside the list.
+
+**Representation (`runtime/tp_aot_str.h`, linked only by a program that has a `str` value).**
+
+- `struct tpa_str { tpa_rc_t rc; uint8_t kind; int64_t len; int64_t hash; <data> }`: CPython's PEP 393 layout without
+  the object header. `kind` is 1, 2 or 4 bytes per code point and is always the narrowest kind that holds the largest
+  code point (every constructor normalises), so two equal strings have equal kinds and `==` compares `kind`, `len` and
+  then the bytes. Indexing and slicing are O(1) per element, as in CPython. A lone surrogate (from `surrogateescape`
+  or from `chr(0xDC80)`) is an ordinary 2-byte code point, as in CPython; UTF-8 storage cannot hold it, which is why
+  this layout and not UTF-8.
+- `hash` is reserved for S2's `dict` / `set` (`-1` until computed); nothing in S1 reads it.
+- Reference counting as the O1 objects (`tpa_str_retain` / `tpa_str_release`, `TPA_RC_*` macros, atomic under
+  `TPA_THREADS`). A `str` holds no reference, so it is acyclic and never tracked by the collector. Literals and module
+  constants are static objects with an immortal count (`TPA_RC_IMMORTAL`, retain and release skip it), so the library
+  build's threads may share them with no write.
+- Not a region or virtual object in S1 (the allocation classifier reports `heap-rc (str)`); a region object's `str`
+  field is an owned heap reference released by the region walk, as a list field is (PR-O2b's R4 relaxation).
+- `s += t` resizes `s` in place only when the local `s` **owns** its reference (it is not an elided borrow: not a
+  parameter under PR-O1 elision rule 1, not a local read from an immutable-after-init field under rule 3, and not
+  the source of a single-consumption move that is still live) **and** the count is 1 and not immortal; otherwise
+  it copies. Ownership is the condition, not the count: a borrowed `s` can show a count of 1 that belongs to the
+  caller's local or to the field, and resizing it would rewrite the caller's string (review of #510, F1). CPython's
+  interpreter does the same through `unicode_concatenate`, which requires the frame's own local and a count of 1;
+  unobservable, since nothing else holds `s`.
+
+**Unicode data.** `lower`, `upper`, `isalpha`, `isdigit`, the whitespace of `split()` / `strip()` and `repr`'s
+printable test depend on CPython's Unicode database. The AOT compiler runs on the reference CPython (3.15t), so it
+generates the tables the program needs from that interpreter, at build time: for each code point, the full mapping of
+`chr(c).lower()` and `chr(c).upper()` (one to three code points: `'ß'.upper() == 'SS'`, `'İ'.lower()` is two code
+points), and bit sets for `str.isalpha`, `str.isdigit`, `str.isspace` and `str.isprintable`, compressed as two-level
+tables. Only the tables the program uses are emitted; the generated C records `unicodedata.unidata_version`, and the build refuses to combine tables (or, in S2, string
+hashes) generated by a different reference interpreter than the one the rest of the build used, so an incremental
+rebuild cannot mix two Unicode versions (review of #510, F5). Final
+sigma: `lower` applies CPython's `handle_capital_sigma` rule (U+03A3 becomes U+03C2 at the end of a word), in the
+runtime, since it depends on context. The tables therefore match the interpreter that built the program bit for bit;
+a program built by a different CPython minor version gets that version's tables, which is what that version prints.
+
+**Output.** CPython 3.15 runs in UTF-8 mode by default (observed on the reference 3.15.0rc1t:
+`sys.flags.utf8_mode == 1`, `sys.stdout.errors == "surrogateescape"`, `sys.stderr.errors == "backslashreplace"`).
+`print` and `sys.stdout.write` therefore encode to UTF-8 from the kind array into the existing buffered `stdout`, a
+code point U+DC80..U+DCFF (what `surrogateescape` decoded from a non-UTF-8 argument byte) is written back as that
+raw byte, and any other surrogate raises `UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in
+position N: surrogates not allowed` (observed). `print` encodes and writes its arguments one at a time, so the
+arguments before the failing one are written, followed by the separator `print` writes before each argument after
+the first, and the failing one writes nothing (observed: `print("a", "x\ud800")` writes `a ` and raises), as
+CPython's `TextIOWrapper` does.
+`sys.stderr.write` and the uncaught-exception line use `backslashreplace`. What the Windows console path needs
+(CPython writes a console through its own console I/O) is decided in S1a with a test on the Windows job; the kernel
+tier's output is ASCII, so the question did not arise before.
+
+**Exact messages (each one in the differential tests).** `IndexError: string index out of range`;
+`ValueError: empty separator`; `ValueError: chr() arg not in range(0x110000)` (also for an int outside 64 bits,
+`chr(2**70)`, observed on 3.15.0rc1t);
+`TypeError: ord() expected a character, but string of length N found`; `int()`'s
+`ValueError: invalid literal for int() with base 10: <repr>` (already exact for `sys.argv`); `OverflowError: repeated
+string is too long` / `MemoryError` for `*` past the size limit (D4 accepts the memory-exhaustion behaviour, not the
+size check, which is reproduced).
+
+**Free threading.** Strings are immutable after construction and constants are immortal; the in-place `+=` applies
+only to a count of 1 (no other holder on any thread). Nothing in S1 shares a mutable string between threads.
+
+**Tests (PR-S1, `test_aot_tier_s1.py`).** Every operation and method differential-tested against CPython over a corpus
+of ASCII, Latin-1, BMP, astral and lone-surrogate strings and the empty string, including each error message above;
+exhaustive table tests (`lower`, `upper`, `isalpha`, `isdigit`, `isspace`, `repr` over every code point
+0..0x10FFFF, printed in chunks and compared with the interpreter); `sys.argv` with non-UTF-8 bytes; the in-place
+`+=` with a second holder, on a parameter whose caller still holds the string, and on a local read from an
+immutable field (each must copy, and the caller's or the field's string must be unchanged); `print` of U+DC80 (the raw byte) and of U+D800 (the arguments before it written, the error line, status 1); leaks
+under LeakSanitizer and use after free under ASan for strings in class fields, lists of strings and region objects;
+a mutant per table (one wrong entry must fail its exhaustive test); the acyclic and string-free programs generate the
+C they generated before (no `tp_aot_str.h`).
+
+**Order.** S1a: representation, literals, operators, `len`, indexing, slicing, `in`, iteration, `print`, f-strings,
+`str()` / `repr()`, `ord`, `chr`, `sys.argv[i]`, `int(s)`, `sys.std*.write`. S1b: the methods, the generated Unicode
+tables, the minimal `list[str]` and `str` fields of classes (the containers of a str: they share the owned-field and
+region-walk work). S2 starts with `str | None` (it needs `is not None` narrowing in the front end, which S2's optional
+containers need too) and the Windows console. Each step is one PR; CI runs per group (S1a+S1b, S2+S3, `__del__`+T1;
+leader, 2026-11-21).
+
+**As implemented in S1a (agent proposal, not owner-confirmed).** A STR value is `ir.Type.STR` (AOT mode only; the
+default mode never produces it) and every operation is its own IR node (`StrConcat`, `StrRepeat`, `StrCompare`,
+`StrContains`, `StrLen`, `StrIndex`, `StrSlice`, `StrOf`, `StrOrd`, `StrChr`, `ArgvStr`, `StrParseInt`,
+`StrWrite`, `ForStr`, and an `FString` of type STR). The emitter follows the TAGGED ints: a str name and each str
+temporary own one reference, an operation writes an emptied temporary only on success, and the cleanup point
+releases them; a parameter is borrowed, and one the body assigns works on an owned copy, so every name owns its
+reference and `+=` may grow in place exactly when the count is 1. Indexing and iteration of Latin-1 text allocate
+nothing (256 immortal one-character strings, as CPython caches them). `print` writes a literal without a surrogate as
+its UTF-8 bytes, as before, and an f-string of numbers piece by piece, as before; an f-string with a str field,
+`!r`, or text with a surrogate is made in full first, as CPython makes it, so nothing of it is written when it
+cannot be encoded. `repr` uses the printable table tp_aot_int.h already has (`int()`'s message); S1b generates the
+tables from the reference interpreter. The Windows console (a console, not a pipe) is the one open output question:
+CPython writes a console through WriteConsoleW, and this step writes UTF-8 bytes through the C runtime, which a
+pipe (every test) receives exactly as CPython's; S2 settles the console with a test on the Windows job.
+
+#### 4.3.2 Tier S step 2 (PR-S2a, S2b, S2c): str | None, containers that change, dict, set, tuple, bytes
+
+Design for S2 (agent proposal, written 2026-11-22; not owner-confirmed, leader review pending). In 1.0 (owner,
+2026-11-21 21:55). Three PRs, one CI group with S3 (leader, 2026-11-21): **S2a** `str | None`, the Windows console,
+lists that change and tuple values; **S2b** `dict`, `set` and the hash they need; **S2c** comprehensions, the
+iteration builtins, `sorted` / `list.sort`, and `bytes`. Every operation is differential-tested against the reference
+with CPython's exact results and messages, as S1; a program without these constructs generates the C it generated
+before.
+
+**`str | None` (S2a).** `Type.STR_OPT`, the same `tpa_str *` with NULL for None (so a STR flows into a STR_OPT slot
+as it is). Accepted: assignment of a str or None, `x is None` / `x is not None`, `==` / `!=` with a str or None,
+passing and returning, `print` / `str` / `repr` / f-string fields (`None` or the string), fields of classes. Every
+other use needs a str and is accepted only where the front end proves `x` is not None: inside `if x is not None:`,
+after `if x is None:` whose branch leaves (return, break, continue, `sys.exit`, raise from S3), in `a if x is not None
+else b`, and in `if x:` / `while x is not None:`; the tests combine through `and`, `or` and `not`. Only a local or a
+parameter is narrowed, never a field expression `o.x` (CPython reads the field again, and a call between the test and
+the use can rebind it; a program copies the field to a local first). The kill rule as implemented: a narrowing ends at
+an assignment of the name (an assignment of a str or of a proved name makes it proved again), and a loop removes, at
+its head, every name its body assigns, so `while n is not None: ...; n = n.next` is accepted. `assert x is not None`
+is not a narrowing until S3 compiles `assert` (an `assert` is refused today). The read is
+then `StrNarrow(x)` (no runtime work; under `-DTP_CHECK_PROVEN` it aborts on NULL, so the sanitizer job checks every
+proof). An unproved use is the finding `aot/optional`, naming the line: Pyrefly reports the same program as a type
+error, so a checked program never hits it. The same narrowing serves `C | None` class values, which today are read
+without a check (a None there is a NULL read in the generated C, undefined behaviour; fixed here: an unproved field
+read or method call through an optional class value becomes `aot/optional` too). This refuses programs that compiled
+before (AGENTS brief rule 5): the guard is test_aot_tier_s2a.py (the finding, not a crash) and the benchmarks
+`binary_trees.py` / `binary_trees_region.py`, which test their locals and still generate the same C.
+
+**Answers to the S2 design review (fable-pmp, 2026-11-22; agent proposal, not confirmed).**
+*B1, lengths that change.* A list kind takes the growable layout only when some function changes the length of a list
+of that kind (above); the other kinds keep the tier K layout and every tier K proof and the measured kernels as they
+are. For a growable kind: (1) the back end never keeps a list's `d` pointer or length across statements (every element
+access reads `l->d` and checks `l->len` at its own point, and a `len()` of a growable kind is read in evaluation order);
+(2) the verifier proves no bound for a list kind that any function can shrink (pop, clear, remove, and later `del` and
+slice assignment), through any alias, so such an access keeps its check; growing keeps every proof, since a length only
+rises; (3) a store evaluates its value before the slot is checked (`l[i] = f()` raises `IndexError: list assignment
+index out of range` when `f()` popped); (4) the self-referential operations copy from the moved block
+(`l.extend(l)`, `l += l`, `l.append(l.pop())`, `l.insert(0, l[-1])`, and slice assignment `l[a:b] = l` when it comes),
+each with a named test; (5) under `-DTP_CHECK_PROVEN` (the sanitizer job) every resize allocates a new block and frees
+the old one, so a stale item pointer is a use after free AddressSanitizer reports every time. The AOT back end has no
+parallel loop (N-15 belongs to the default mode), so no partition by length exists to invalidate.
+*B2, the library's thread promise.* Option (a) of the review: a list kind the library resizes cannot cross the export
+boundary (`aot/library-resize`, at the export) until tier T adds per-list locking; a kind resized only inside the
+library takes the growable layout there and never reaches the host. The boundary layout and the header's promise
+("the list never changes length", `_data` valid while the handle is held) stay true, so the ABI version stays 2.
+*B3, tracked containers at the boundary.* A container type the cycle collector tracks (below, B4) is refused at the
+export boundary with `aot/library-mutable-class` until tier T, as a mutable class is: the collector's state is
+thread-local under `TPA_THREADS`. No parallel body exists in the AOT mode (B1).
+*B4, containers in the cycle analysis.* Containers become nodes of the type graph of 6.3.1 (`list[T] -> T`,
+`tuple[...] ->` each member, `dict[K, V] -> K, V`, a class `->` its field types); a list or dict node is never
+immutable-after-init (it changes without any field assignment); the cyclic-capable set is, as in 6.3.2, every member of
+a component that has a cycle and a mutable member. So `children: list[Node]` makes `Node` cyclic-capable, while
+`list[list[int]]` and `list[Leaf]` (scalar fields) are not tracked. An element of an owned kind (big int, str, class,
+list, tuple, dict) read out of any container is a new reference, whatever field holds the container (elision rules 3
+and 4 of 6.3.1 never apply through a container); `pop` moves its reference out.
+*N1, NaN.* CPython's `in`, `index`, `count`, `remove` and list `==` test identity before equality, which unboxed
+doubles do not have. The AOT mode refuses those operations on a float list or a container holding floats
+(`aot/identity`) instead of answering differently; ordering (`<`) and printing are unaffected.
+
+**Windows console (S2a).** When standard output or error is a console (`GetConsoleMode` succeeds on its handle),
+the text is written as UTF-16 with `WriteConsoleW`, as CPython's `_WindowsConsoleIO` does; the encoded UTF-8 is
+decoded first, so a raw surrogateescape byte becomes U+FFFD, as it does in CPython. A pipe or a file gets the UTF-8
+bytes as now. The runtime already includes `windows.h` on Windows (lean), so the console functions are the system's declarations; stdio is flushed before each console write, so text and numbers keep their order.
+Test: the Windows job runs a program under a pseudo-console where the runner allows it; elsewhere the decision rests
+on the pipe tests and the code review.
+
+**Lists that change (S2a).** A list that can change size has the runtime layout `{count, length, capacity, kind,
+items *}`: the items live in a separate block, so `append` / `insert` / `extend` / `pop` / slice assignment can move
+them while every name of the list keeps the same handle (CPython's aliasing: `a = b; b.append(1)` changes `a`). `kind`
+says what an item slot holds: an IEEE double, an int64 (RAW group), a `tpa_int` (big-capable group, owned), a str, a
+class instance, a list, a tuple (owned references). Which lists take this layout is decided per list type for the
+whole program (a list can only flow into names of its own type, so every alias of a list has its layout): when any
+operation of the program changes the length of a `list[float]`, every `list[float]` takes the growable layout, with
+element access `items[i]` and the same bounds rule; likewise for `list[int]` (both the RAW and the big-capable kind),
+`list[str]` and each other list type. A list type the program never resizes keeps the tier K layout (`{count,
+length, d[]}`, element access `d[i]`). (Per list group, as `aot/rep.py` groups `list[int]` names, would be finer; it
+can replace this rule later without a visible change.) So a program that never resizes a list generates the C it
+generated before, and the tier K loops (nbody, spectral_norm) keep one load per element. (Amendment 2026-11-22,
+agent proposal, not confirmed: the first text of this section moved every list to the new layout, which contradicted
+the "generates the C it generated before" rule above and added an indirection to the tier K loops.) Growth by CPython's
+over-allocation formula (`list_resize`), so `sys.getsizeof` would agree (not exposed; the formula only sets the
+amortised cost). Operations: `append`, `pop()` / `pop(i)` (`IndexError: pop from empty list`, `pop index out of
+range`), `insert` (CPython's clamping), `extend` of a list, `remove` (`ValueError: list.remove(x): x not in list`),
+`index` (`ValueError: list.index(x): x not in list`, the message of CPython 3.14 and later, which does not
+format the value; so `index` of a class instance needs no repr), `count`, `clear`, `reverse`, `copy`, `+`, `*`, `+=` (extends in place:
+the same object), `==` / `!=` / `<` ... (element-wise, CPython's rich comparison order), `in`, slicing and slice
+assignment (`ValueError: attempt to assign sequence of size N to extended slice of size M`), `del l[i]` and
+`del l[a:b]`, `list(xs)` copy, `print` / `repr`. Iteration follows CPython's list iterator: index and length read at
+each step, so appending inside the loop is seen. Element types: int, float, bool, str, `str | None`, compiled classes,
+lists, tuples, dicts and sets (S2b). A list of lists is a list whose items are lists (owned references); a cycle
+through lists is possible (`a.append(a)`), so a list that can hold a list or a class is tracked by the cycle
+collector of tier O, like a cyclic-capable class (6.3.2 step 3). Library ABI: the list handles stay opaque; `_data`
+returns the item block, valid until the next call that may resize the list; ABI version 2.
+
+**Tuples (S2a).** A tuple value of a fixed shape `tuple[int, str, ...]` (the shape in the type; no `tuple[T, ...]` of
+variable length until S2c) is an immutable counted object with one slot per element and the slot kinds known
+statically. Construction, indexing by a constant or a variable (bounds checked, `IndexError: tuple index out of
+range`), unpacking, `len`, `==` / ordering, `in`, hashing (S2b), `print` / `repr` (`(1,)` for one element). The fixed
+tuple returns of tier K stay as they are (an unboxed multi-value return), and become values only where a tuple is
+stored, passed or compared.
+
+First step, as implemented (amendment 2026-11-22, agent proposal, not confirmed): a tuple of int, float, bool and str
+held by a local or a parameter of a module function has no observable identity in the accepted subset (no `is`, never
+in a container or a field), so the front end splits it into one local per element on the AST it lowers, after Pyrefly
+has typed the source (`typedpython/tuples.py`); the IR, the verifier and the back end see the element locals, the
+tier K multi-value return and one node, `TupleIndex`, for a variable index. Covered: displays, `t = u`, `t = f(...)`,
+`t[k]` for a constant k, `t[i]` for any int index of a tuple whose elements share a type (`TupleIndex`: the index, its
+slot by CPython's rule with `IndexError: tuple index out of range`, then the chosen element local), `len`, unpacking and
+`a, b = b, a`, `==` / `!=` / `<` ... (CPython's first differing item, then the lengths), `in`, `for v in t` when the
+elements share a kind, `print` / `str` / `repr` / f-strings, passing a tuple name or display to a tuple parameter, and
+returning a tuple name or a tuple-returning call. A slice `t[a:b:c]` whose bounds are absent or int constants
+(amendment 2026-11-25, agent proposal, not confirmed) has a static shape, so it is the tuple of the element locals it
+takes (positions by Python's own slice rules: negative bounds, bounds past either end, a negative step, an empty
+result printed `()`), accepted wherever a tuple name is (bound, unpacked, passed, returned, compared, searched, `len`,
+printed). Refused with the reason: a variable index into a tuple whose element types differ (its type is a union,
+which the AOT mode does not type), a slice with a bound that is not an int constant (its length is known only at run
+time, a `tuple[T, ...]`, S2c) or a step of 0, `is`, a tuple
+anywhere else as a value, a comparison or `in` with a float item (CPython tests identity first: NaN, `aot/identity`),
+a tuple parameter of a method, and a tuple parameter at the library boundary (`aot/export`). A returned tuple may hold
+str elements (each a new reference the caller owns through its out slot); such a function is not exported from a
+library yet (the Kotlin result class holds scalars).
+
+Second step, lists of tuples (amendment 2026-11-23, agent proposal, not confirmed): a `list[tuple[int, str]]` local or
+parameter of a module function whose elements are int, float or str is split the same way, into one list per element
+position (`L__0: list[int]`, `L__1: list[str]`). A tuple read out of the list is an immutable value with no identity in
+the accepted subset, so the parallel lists hold what CPython's list holds; every alias of the list (another name, a
+parameter) holds the same parallel list objects, so a change through one is seen through all. Each list operation is
+applied to every element list in turn, with the index and the values evaluated once, first, in CPython's order; one
+that fails (IndexError) fails on the first element list, before any changed. Covered: a display, `[]`, another such
+list, `+`, `+=`, `*`, a slice, `list(L)`; `append`, `insert`, `extend`, `pop` / `pop(i)` (a statement, bound or
+unpacked), `clear`, `reverse`, `L[i] = t`, `del L[i]`, `del L[a:b]`; `len`, `L[i]` bound, unpacked, compared and indexed
+by a constant (`L[i][0]` is `L__0[i]`); `for t in L` and `for a, b in L` (CPython's list iterator: the length read at
+each step, an item appended in the body is visited); `print` / `str` / `repr` / f-strings (the repr is built in a loop
+before the statement, so such a statement may call nothing else); passing to a `list[tuple[...]]` parameter of a module
+function; `t in L`, `not in`, `L.count(t)`, `L.index(t)`, `L.remove(t)` (a loop over the element lists comparing each
+item with `t` element by element, as CPython's tuple `==` does; the ValueError of `index` and `remove` is CPython's own,
+raised by the same method of an empty `list[int]`, since an AOT program has no `raise` yet), and `==`, `!=`, `<`, `<=`,
+`>`, `>=` of two such lists (`==` of each element list; an ordering finds the first index where the items differ, then
+compares the lengths there or the two items as tuples). A search or an ordering is computed before its statement like a
+repr, so the statement calls nothing else, a `while` condition may not hold one, and the tuple searched for is made of
+names and constants. Refused with the reason: a bool element (there is no list of bool yet), a float element in a search
+or a comparison (CPython tests each pair by identity first, a NaN equals itself there: `aot/identity`), sorting (S2c) or
+returning such a list, and one in a field or a method parameter: these come with tuple objects.
+The same change gives `xs: list[int] = []` and `list[float]` (the creation `[v] * 0`), and `words[i] = s` for a list of
+str (the new item held before the old one is released; `IndexError: list assignment index out of range`).
+`list[str | None]` (amendment 2026-11-23, agent proposal, not confirmed): the list[str] layout (`tpa_str_list`) with
+NULL for a None item, a type of its own (`STR_OPT_LIST`) because lists are invariant: a list[str] name is never passed
+or bound where a list[str | None] is wanted, or the callee could store None into the caller's list of str (refused
+with that reason); a display of str and None, or of str only, bound to one is one. An item reads as a `str | None`
+(narrowed by `is None` / `is not None` as any other); stores, the list methods, `+`, `*`, slices, `list(xs)`, loops and
+`len` are the list[str] ones. What reads an item's value has its own runtime function: `in`, `count`, `index` and
+`remove` compare as `str | None` `==` does (None equals only None, CPython's identity-or-equality gives the same),
+`==` / `!=` likewise, an ordering that reaches a None item raises CPython's `TypeError: '<' not supported between
+instances of 'NoneType' and 'str'` (the operator and the two types in the order written), and `repr` prints `None`.
+`sep.join(xs)` stays refused (`list[str]` is what join takes), and so does a list[str | None] field.
+Tuple fields and method parameters (amendment 2026-11-25, agent proposal, not confirmed): a class field
+`p: tuple[int, str]` (elements int, float, bool, str; also named in `__slots__`) is split into one field per element,
+`p__0: int` and `p__1: str`, for the same reason (no identity in the accepted subset, so the fields hold what the one
+field holds). `o.p` is rewritten by the attribute name alone, so a name is split only when every declaration of it in
+the program's classes is a tuple field of one shape (Pyrefly has checked that `o.p` names a declared attribute); any
+other tuple field leaves its class refused with the field's type. A field is read through a local name (`o.p`, `self.p`)
+wherever a tuple name is accepted (bound, unpacked, passed, returned, compared, searched, sliced with constant bounds,
+`len`, printed, indexed by a constant, or by a variable when its elements share a type and the index is a name or a
+constant: `TupleIndex` evaluates the index before the elements, and CPython reads the field first, which an index
+expression with a call could rebind), and stored by `o.p = value` (every element of the value evaluated first, then
+each element field stored). A tuple parameter of a method is split as a module function's, and so is every argument
+of a call `o.m(...)`: by the method name alone, so only when every declaration of `m` in the program's classes is a
+method with the same parameter types; a tuple parameter of `__init__` likewise through the call `C(...)`. Refused with
+the reason: a tuple field used as a value anywhere else (`for v in o.p`), a method whose name is declared differently
+elsewhere, a list of tuples field or method parameter. Classes cross the library boundary as opaque handles with no
+field accessors, so a split field changes nothing there.
+A method declared `-> tuple[...]` returns its elements through out slots as a module function does; `a, b = o.m()`,
+`t = o.m()` and `return o.m()` take them, by the method name alone when every class declares `m` with that return.
+Still to come in S2a: tuple objects where a tuple must be one value (returning a list of tuples, a list of tuples in a
+field or a method parameter; dict keys in S2b).
+
+**dict and set (S2b).** `dict[K, V]` with K int, str, bool or a tuple of those; V any S2 type. The layout is CPython's
+compact dict (an index table of slots and an entry array in insertion order, open addressing with CPython's
+perturbation probe), so iteration order is insertion order, as CPython guarantees. The hash function is not CPython's:
+the str hash is seeded per process in CPython and so is unobservable (`hash()` stays `aot/identity`), and the int
+hash only decides slot positions, never an order the program sees; equality is CPython's (`1 == True`, so a
+`dict[int, ...]` keyed by `True` finds `1`, and the stored key keeps the type it was first inserted with, as CPython
+keeps the first key object). Operations: `d[k]` (`KeyError: <repr of k>`), `d[k] = v`, `del d[k]`, `in`, `get`
+(with default), `setdefault`, `pop` (with default), `keys` / `values` / `items` in loops and comprehensions,
+`len`, `update` from a dict, `==`, `print` / `repr`, iteration (`RuntimeError: dictionary changed size during
+iteration` exactly where CPython raises it). `set[K]`: `add`, `discard`, `remove` (`KeyError`), `in`, `len`, `|`
+`&` `-` `^` into new sets, `==`; iterating a set, or printing it, depends on CPython's hash table and seed, so it is
+`aot/set-order` except through `sorted(...)`, as section 4.3 says.
+
+First step of S2b, as implemented (amendment 2026-11-25, agent proposal, not confirmed). The runtime
+(`runtime/tp_aot_dict.h`) mirrors Objects/dictobject.c of CPython 3.14 and later rule for rule: the table sizes
+(`calculate_log2_keysize` is the smallest power of two of at least `max(minsize, 8)`; 3.13 rounded `minsize | 8`
+up, which gives other tables after a copy or an update), the presize of a display, the insertion resize, deleted
+entries left in place until a resize compacts them, `popitem` truncating the entry count, `clear`, the clone and
+merge paths of `copy` and `update`, and the iterator's two checks with CPython's messages. A test runs thousands of
+random operation scripts on the runtime and on CPython's dict and compares what each prints, live iterators
+included (`test_aot_dict_runtime.py`). The front end compiles `dict[K, V]` with K int, str or bool and V int, float,
+bool, str or `str | None`, as locals, parameters and returns of module functions: displays, `d[k]`, `d[k] = v`,
+`del d[k]`, `in` / `not in`, `get` (with a default; without one for str values), `setdefault`, `pop` (with and
+without a default), `len`, truth, `update` from a dict, `copy()` and `dict(d)`, `clear()`, `==` / `!=`, `print`,
+`str`, `repr` and f-strings, and `for` loops over the dict, `keys()`, `values()` and `items()`. A dict holds its
+ints as `tpa_int` (any int; aot/rep.py), so a big int is a key like any other. A display is built as CPython's
+bytecode builds it (chunks of 17 pairs; a chunk of at most 15 is presized, a longer one starts empty, later chunks
+are merged), so a loop that changes the dict sees CPython's layout. `print` makes the repr of a dict (and of a list)
+argument when it writes it, as CPython's print does. Refused with the reason: a value of another type than the
+dict's (CPython keeps the object, so a bool in a `dict[str, int]` or an int in a `dict[str, float]` would print
+differently), a bool key inserted into a dict of int (a loop would give a bool where the program reads an int; a
+bool may look a key up), `==` of dicts of float values (CPython tests identity first: `aot/identity`), and a dict of
+other kinds passed where a dict is wanted (dicts are invariant). Dict fields of classes, and dicts as method
+parameters and returns, follow (same day): a field read of a dict is held for the operation, as a list field's, and
+a class with a dict field is always a heap object. `popitem()` follows: unpacked into two names (`k, v =
+d.popitem()`), bound to a tuple, returned from a function declared `-> tuple[K, V]`, or as a statement; it takes the
+last entry, truncates the entry count as CPython does, and raises `KeyError: 'popitem(): dictionary is empty'`. A
+dict may then be a dict's value (`dict[str, dict[int, int]]`, any depth): `d[k][j] = v`, `d.setdefault(k, {})[j] = v`,
+methods and loops of `d[k]`, and an inner dict bound to a name is the same object (aliasing as in CPython). Its type is
+a part of the outer type, so it cannot hold the outer dict back: no cycle, and reference counts free it. `d[k] op= v`
+reads the dict and the key once, then `d[k]`, then the value, as CPython. A `list[dict[K, V]]` follows: a list of
+counted dicts (the runtime's list of owned references), as a local, a parameter, a return and a field; displays (`[]`
+where the type is known), `append`, `insert`, `pop`, `extend`, `clear`, `reverse`, `xs[i]` (the dict itself) and
+`xs[i] = d`, `xs[i][k] = v`, `len`, `for d in xs` and the repr. Searching one (`in`, `index`, `count`, `remove`) compares
+dicts by value with an identity test first, and is refused until it is done; so is `==` of two lists of dicts. Tuple
+keys follow (`dict[tuple[int, str], V]`, elements int, str or bool): a key tuple is a counted runtime tuple made from
+its elements in order (`d[a, b]`, `d[t]`, `t in d`, `get` / `pop` / `setdefault`), with CPython's equality and repr
+(`(1, 'a')`, `KeyError: (5, 0)`); a loop or `popitem` binds the key to a tuple name (split into its element locals, as
+any tuple) or to one name per element (`for (i, j), v in d.items()`). An element of another type than the key's (a bool
+for an int) is refused: the tuple would keep it. `set[T]` follows (T int, str, bool or a tuple of them): a dict whose
+values are unused, as a local, a parameter, a return and a field; displays, `set()`, `set(s)`, `add`, `discard`,
+`remove` (`KeyError(x)`), `clear`, `copy`, `update`, `in`, `len`, truth, `==`, the subset tests (`<=`, `<`, `>=`, `>`,
+`issubset`, `issuperset`, `isdisjoint`) and `|`, `&`, `-`, `^` (and the one-set `union`, `intersection`, `difference`,
+`symmetric_difference`). What depends on the order of a set (a loop over one, its repr, `pop()`) follows CPython's set
+table, which this one is not: refused as aot/set-order. The view objects follow where they are used at once:
+`len(d.keys())`, `x in d.keys()`, `v in d.values()`, `(k, v) in d.items()` (CPython's dictitems_contains; float values
+refused, aot/identity) and the repr `dict_keys([...])` / `dict_values([...])` / `dict_items([...])`, made when print
+writes it. A view may then be bound to a name (`ks = d.keys()`, and `values()`, `items()`; agent proposal, not
+confirmed): the name holds the dict itself (a counted reference, `ir.DictView`), so the view shows the dict as it is
+when it is used and keeps that dict when the dict's name is bound again, as CPython's view object does. A view name is
+used as the views above are, and by a `for` loop (CPython's dict iterator, so a dict that changes size raises), its
+truth (`if ks`, `not ks`, `bool(ks)`), and binding it to another view name of the same view and kinds. Anything else of
+a view name (subscript, a dict method, `==`, the set operators, `list()` / `dict()` of it, putting it in a list or a
+dict) is refused naming the view. A view is also passed to a function and returned from one (agent proposal, not
+confirmed): the parameter or result is annotated `KeysView[K]`, `ValuesView[V]` or `ItemsView[K, V]`, imported by
+`from collections.abc import KeysView, ValuesView, ItemsView` (the one `from` import of an AOT program, for annotations
+only), and it holds the view's dict as a view name does; a view of a dict made in the callee keeps that dict alive. A
+KeysView does not name the values of its dict, nor a ValuesView its keys, and the view reads only its half, so a
+`KeysView[str]` parameter takes the keys of a `dict[str, int]` and of a `dict[str, float]` alike (`ir.view_match`).
+The argument is a view of that half (`d.keys()`, a view name, a call of a function returning one); a dict or another
+view is refused naming both views. A call returning a view is used as a view is (a `for` loop, len(), `in`, its truth,
+the repr, binding it to a view name, passing it on). A method returns a view the same way (`def names(self) ->
+KeysView[str]: return self.items.keys()`, called as `obj.names()` on a local of the class, the call method_call
+makes directly); a view does not cross the library boundary (aot/export). In a library an export may bind views of its dict
+parameter: a view name is only read, so it is no write (aot/library-dict-write). `set(xs)` of a list[str] or list[int] name and `set([a, b])`
+follow too. A dict crosses the library boundary as `dict[int, int]`, `dict[int, float]` and `dict[int, bool]` (8.1 to
+8.3, ABI version 3): the library only reads a dict parameter of an export (aot/library-dict-write otherwise, through
+the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. What S2b
+listed is in place (agent proposal, not confirmed).
+
+**S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
+accumulator built in place). First step in (agent proposal, not confirmed): a comprehension that is the whole value
+of an assignment to a name or of a `return` is rewritten into the loop it means before lowering
+(typedpython/comprehensions.py). Each variable becomes a hidden local typed by Pyrefly at a probe (a
+`[(x, y,) for x in xs for y in ys]` put before the statement in the copy Pyrefly types, the clauses without their
+conditions, so a variable has its declared type). The accumulator is hidden and typed as its target, so the target is
+bound once the comprehension is complete and `xs = [x + 1 for x in xs]` iterates the old list. The first iterable is
+evaluated first, and a dict comprehension's key before its value (through a temporary of the key type). A
+comprehension anywhere else (an operand, an argument) is refused as "bind it to a name first", and so are `:=` and a
+comprehension, generator or lambda inside one. Second step in (agent proposal, not confirmed): `enumerate` and
+`zip` as the iterable of a `for` loop or of a comprehension clause (typedpython/loops.py), each unpacked into names.
+`for i, x in enumerate(it, start)` takes any iterable a loop takes and an int constant start; it is the loop over
+`it` with a hidden counter bound to `i` before the body, so a `continue` counts and `i` keeps its last value after
+the loop. `for a, b in zip(xs, ys)` takes names of lists or strs (or a str constant) that the loop does not rebind;
+it reads each by index while the index is below every length, the lengths read at each step left to right, so a
+list that grows in the loop is seen growing as CPython's list iterator sees it. zip's names are typed as the
+elements of the operands, from the type Pyrefly gives each operand in the `for` header. A dict or a set operand
+is refused (zip reads by index), and so are `strict=`, a single name as the target, and enumerate or zip anywhere
+else. `for x in reversed(xs)` (also inside enumerate()) takes the same operands and reads from the end, the index
+checked against the length at every step as CPython's reversed list iterator checks it: a list that shrinks in the
+loop ends it early, one that grows is not seen growing. A range object held in a name (`r = range(a, b, STEP)`,
+typedpython/ranges.py) is its start and stop in hidden int locals, its length computed once per binding, and its
+constant step; a `for` loop over it (also in a comprehension or an enumerate()), len(), `in`, its truth and its
+repr (print, str, repr, an f-string) are rewritten into what CPython computes. A step that is not an int
+constant, a step of 0 (CPython's ValueError at run time, refused at compile time here), a name bound to a range
+and to anything else, and any other use (passing, returning, indexing, list(), zip(), reversed()) are refused.
+`sum(it[, start])`, `any(it)` and `all(it)` bound to a name or returned are the loop each means over any iterable a
+`for` loop takes (typedpython/comprehensions.py): an int sum adds as CPython's int path does; a float sum takes a
+float constant start (with the default int start an empty sum is the int 0, which a float cannot hold) and adds
+with CPython's compensated summation (Neumaier, `cs_add` / `cs_to_double` in Python/bltinmodule.c), so
+`sum([0.1] * 10, 0.0) == 1.0` as in CPython; any() and all() stop at the first true or false item; `min(it)` and `max(it)` keep the first item and replace it by
+one that compares strictly smaller (larger), as CPython's `min_max` does (a NaN first stays), and of an empty
+iterable raise CPython's `ValueError: min() iterable argument is empty` (an `ir.Raise` statement, made only by
+this rewrite: a `raise` of the program stays refused); with `default=d` an empty iterable gives `d` instead (agent
+proposal, not confirmed; `d` a constant or a name of the items' type, since the loop reads it before the iterable);
+with `key=k` each item's key is computed as the item is read, and the item kept with its key is replaced by one whose
+key compares strictly smaller (larger), as `min_max` does (agent proposal, not confirmed; items of int, float, str,
+bool or tuples of them, keys of those types). A generator expression as the argument of such a call is
+the loop it means (leader, 2026-11-28: "accept them as the argument of sum/any/all/min/max/sorted, rewritten into the
+loop, as long as Python semantics (laziness, short-circuit for any/all) are preserved"): its first iterable is
+evaluated first, each item is computed when the call would take it, so any() and all() stop computing at the first
+true (false) item; a generator anywhere else stays refused (section 4). `sum(it, start)` with a start that is not a
+constant or a name is refused unless the iterable is a name, since the loop reads the start first and CPython the
+iterable first (a defect found here, for every iterable). Then `zip` and `reversed` of other iterables, range
+objects passed and indexed, in `for` loops and comprehensions. `sorted(it, key=k)` and `xs.sort(key=k)` are in
+(agent proposal, not confirmed): `k` is the name of a function or a lambda of one parameter, inlined where the key
+is applied (its body binds nothing and makes no function). As `list_sort_impl` does, `reverse` is evaluated first,
+then every key, left to right, into a hidden list (a key that raises stops the sort before any item moved), then
+CPython's listsort orders (key, position) pairs by key only (`TPA__DEF_KEYSORT`, the same `TPA__DEF_SORT`, so the
+pairs move as CPython moves its keys and values together) and each list is moved by the positions (one list, or
+every element list of a list of tuples). Keys are int (raw or big), float or str; a tuple key is not in yet. While
+CPython computes the keys of `xs.sort` the list is empty, so a key that reaches `xs` sees `[]`: `xs.sort(key=k)` is
+refused unless its items are int, float, str, bool, bytes, `str | None` or tuples of them and every name the key
+reads that the function binds holds one of those (sort a copy with sorted() otherwise). Without a key it is in (agent proposal, not confirmed): `xs.sort(reverse=r)` of a list of int,
+float or str, and `sorted(it, reverse=r)` bound to a name or returned (the list built by the loop, then sorted),
+are CPython's own algorithm (timsort, `listsort` in Objects/listobject.c of 3.15.0rc1, the embedded version, ported
+as it is in tp_aot.h as `TPA__DEF_SORT`; 3.15 takes a minrun per run, `minrun_next`, where 3.14 took one for the
+list, which orders NaN differently), so the order of equal and of unordered elements (NaN) is CPython's, not
+merely some stable order. A fuzz of the port against CPython 3.15.0rc1's sorted() over lists of floats with NaN
+(lengths 0 to 3000) found no difference. `bytes` is in (agent proposal, not confirmed): `Type.BYTES`, an immutable
+byte array held as a `tpa_str` of kind 1 whose code points are the bytes, so ownership, `+`, `*`, slicing,
+comparison (by unsigned byte), `in` of a bytes and `len` are the str nodes and functions (a bytes literal is the
+static Latin-1 str literal of the same bytes); a local, a parameter or a return value. Literals,
+`s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError, its range the run of
+surrogates), `b.decode()` / `decode("utf-8")` (strict UTF-8, a port of stringlib's `utf8_decode` of 3.15.0rc1:
+CPython's UnicodeDecodeError with its reason, invalid start byte, invalid continuation byte or unexpected end of
+data, and its range), indexing (an int; `IndexError: index out of range`), `int in b` (`ValueError: byte must be in
+range(0, 256)`), iteration (ints: the bytes held, an index loop), truth, `print` / `str` / `repr` / an f-string field
+(`b'...'`, PyBytes_Repr's smart quotes and escapes), `bytes()`, `bytes(n)` (`ValueError: negative count`),
+`bytes(xs)` of a list[int] and `bytes([...])` (`ValueError: bytes must be in range(0, 256)`). A fuzz of the C
+decoder, encoder and repr against CPython 3.15.0rc1 (60,004 byte strings of up to 8 bytes) found no difference.
+Refused, each with its reason: a bytes in a list, a dict, a class field or across the library boundary, `bytes ==
+str` (never equal in CPython), an encoding other than utf-8, `errors=`, the other bytes methods, `bytes(s, enc)`
+and `%` formatting.
+
+**Tests.** `test_aot_tier_s2a.py`, `_s2b.py`, `_s2c.py`: differential over generated cases (random operation
+sequences on lists and dicts checked against the reference, every error message), aliasing (two names of one list,
+a list in a class field, a list in a list), the in-loop mutation rules, the cycle collector on list cycles under
+`TPA_GC_STRESS`, LeakSanitizer on everything, the library ABI v2 fixture, and a timsort mutant (one changed
+`MIN_GALLOP` must change the order of a NaN-holding list).
+
 ### 4.4 Tier T, threads
 
 Section 7.
@@ -339,6 +804,232 @@ and baseline memory work against the aim).
 CPython also frees such objects by reference count. That equivalence does not hold for objects in
 regions or for elided counts, so a class with `__del__` is always reference counted with exact counts.
 
+### 6.3.1 Tier O step 1 (PR-O1): headerless classes, reference counting, and acyclicity
+
+Design for PR-O1 (`binary_trees.py`, before virtual objects and scope regions arrive in PR-O2; leader
+review 2026-11-20, not owner-confirmed).
+
+- **Struct layout.** Each compiled class `C` lowers to a plain C `struct tpa_cls_<C>` with no `PyObject`
+  header and no class-id word (no inheritance or dynamic `isinstance` in PR-O1):
+  - `tpa_rc_t rc` first (`int64_t` in an executable; `_Atomic int64_t` under `TPA_THREADS`).
+  - Fields in declaration order: `float` as `double`, `bool` as `uint8_t`, `int` as `int64_t` (RAW) or
+    `tpa_int` (TAGGED, owned), native lists as counted handles (owned), `D` as `tpa_cls_<D> *` (non-null,
+    owned), and `D | None` as `tpa_cls_<D> *` (`NULL` represents `None`, owned).
+  - Allocation sets `rc = 1` (failing with `MemoryError` on `NULL`). If `__init__` raises after setting
+    some reference fields, the constructor releases those initialized fields and frees the struct.
+  - Release decrements `rc`; at zero it releases owned reference fields and frees the struct. To avoid
+    C stack overflow when freeing deep self-referential chains, the last self-referential field is
+    released via a tail loop (`while (p != NULL)`). Every other field of a class type is released by a
+    call, which nests; so the release of a class that has such a field counts its nesting depth on a
+    thread-local counter, and past `TPA_TRASH_LIMIT` (1000) it parks the object (count zero, untracked)
+    with the class's `_drop` function on a thread-local list that the outermost release drains (review of
+    #508, F1; CPython's trashcan). A chain of any length through any field, or alternating between
+    classes, is then freed with bounded C stack depth; only the order of frees beyond the limit changes,
+    which nothing observes (AOT compiles no `__del__`, a freed object is unreachable). A class with no
+    field of a class type keeps its release unchanged. Tests: `test_aot_release_depth.py` (500k chains,
+    a mutant without the bound).
+- **Single immutability analysis (shared source of truth).** One whole-program pass classifies each
+  field `(C, field)` as **immutable-after-init** if and only if no statement outside `C.__init__`
+  anywhere in the program assigns to that field, and `C.__init__` does not store `self` into any field
+  or let `self` escape into another call. A class `C` is **immutable-after-init** when every reference
+  field of `C` is immutable-after-init. Both the acyclicity proof and the reference-counting elision
+  rules below read this exact same analysis result so the two cannot disagree.
+- **Cycle-freedom proof (PR-O1).** Because PR-O1 has no cycle collector yet, a class `C` is accepted
+  only if it is proved acyclic by at least one of:
+  1. *Type-graph acyclicity*: in the directed graph where `C -> D` if `C` has a field of type `D` or
+     `D | None`, `C`'s strongly connected component has no cycle.
+  2. *Immutable-after-init*: `C` (and every class reachable in its SCC) is proved immutable-after-init by
+     the shared analysis above (so every reference points strictly to an already-constructed object,
+     forming a causal DAG, as in `binary_trees.py`'s `Node`).
+  Any class that fails both conditions was a compile error (`aot/cycle-possible`, naming the class and
+  the mutating field store outside `__init__`) until PR-O2c added the small cycle collector (6.3.2 item
+  3, "Step 3 as implemented"): such a class now compiles, tracked by the collector.
+- **Reference counting and elision rules.** Ownership follows the same convention as native lists and
+  `tpa_int`: parameters are **borrowed**; locals, return values and struct fields are **owned**.
+  Elision is permitted only under the following statically proved conditions, and every other site emits
+  explicit `retain` / `release`:
+  1. *Borrowed parameter reads*: reading or forwarding a borrowed parameter directly does not retain or
+     release it.
+  2. *Single-consumption move*: an owned temporary (constructor or call result) consumed once as a local
+     initializer, `return` value, or field/constructor initializer transfers ownership with no extra
+     `retain` / `release`.
+  3. *Field read into a local*: a local initialized from `x.field` may be treated as borrowed (no
+     `retain` / `release`) **only if** `(C, field)` is proved immutable-after-init program-wide by the
+     shared analysis above (and `x` itself outlives the local, e.g. `x` is a borrowed parameter or an
+     unrebound local). "No field write in this function" is **not** sufficient because a callee or an
+     alias can mutate `x.field` and free the old object; any mutable field read must `retain`.
+  4. *Field passed as a borrowed argument*: passing `x.field` directly to `f(x.field)` may pass it as
+     borrowed **only if** `(C, field)` is proved immutable-after-init program-wide (and `x` outlives the
+     call). If `(C, field)` is mutable, the caller must `retain` the value into a temporary before the
+     call and `release` it after the call, so `f` mutating `x.field` (directly or through an alias)
+     cannot free its own argument.
+- **Library mode (`TPA_THREADS`) restriction before Tier T.** Under `TPA_THREADS`, a concurrent writer
+  to a mutable reference field could release the old object between another thread's load and `retain`
+  (the same race `tpa_int_list` solves with a per-list lock). Until Tier T adds shared-object locking,
+  C-ABI class handles are not yet exported in PR-O1, and an `aot-lib` export whose parameter or return
+  type is a class that is not transitively immutable-after-init (checking every class reachable from
+  its fields) is a compile error (`aot/library-mutable-class`).
+- **Verification plan (PR-O1 tests).**
+  - Differential tests against CPython 3.15t for scalar/list/class/`C | None` fields, methods, `is None`
+    / `is`, and `benchmarks/typedpython/py/binary_trees.py`.
+  - Adversarial lifetime tests under ASan/UBSan (`typedpython.yml` `sanitizers` job) specifically
+    exercising: (a) a local read from a mutable field whose owner is mutated through an alias or callee
+    before the local is read again, (b) `f(x.field)` where `f` mutates `x.field` while using its
+    parameter, (c) partial `__init__` failure cleanup, and (d) deep tree deallocation.
+  - Acyclicity acceptance/rejection tests (type-graph acyclic mutable class accepted; immutable-after-init
+    self-referential `Node` accepted; mutable self-referential class rejected with `aot/cycle-possible`;
+    `__init__` `self` escape rejected; `aot-lib` mutable class rejected with `aot/library-mutable-class`).
+  - `aot-check` sync: `binary_trees.py` reports 0 blocking findings.
+
+### 6.3.2 Tier O step 2 (PR-O2): virtual objects, scope regions, cycle collector, and acyclic `__del__`
+
+Design for PR-O2 (`binary_trees_region.py`, `binary_trees.py` region allocation, mutable cyclic classes,
+and acyclic `__del__`; agent proposal, leader review 2026-11-20, not owner-confirmed).
+
+Each allocation site (`New`) is classified statically in the following order. A class that defines
+`__del__` skips steps 1 and 2 and always uses step 3 with exact reference counting so destructor timing
+matches CPython.
+
+1. **Virtual objects (N-12a, scalar replacement).**
+   - *Conditions*: the instance never escapes its creating function (not returned, not stored in any
+     field or container, not passed to another function), is not compared with `is` / `is not`, is not
+     merged with another instance across a branch join (phi), and defines no `__del__`.
+   - *Method calls*: a method call on a candidate virtual object is allowed **only if** the method is
+     non-recursive and inlined at the call site; any non-inlined method call or recursion disqualifies
+     the site and falls back to heap allocation (step 2 or 3).
+   - *Layout*: no heap allocation and no C struct; each field is a plain C local variable, with owned
+     fields following normal local cleanup.
+2. **Scope bump regions (N-12b/c).**
+   - *Layout*: region-allocated instances use a distinct C type `struct tpa_reg_<C>` with **no `rc`
+     header** (zero reference counting). A region (`tpa_region`) owns a linked list of bump-allocated
+     chunks and frees every chunk at once when its owning scope exits. Because `struct tpa_reg_<C> *`
+     and `struct tpa_cls_<C> *` are incompatible C pointer types, mixing them is a compile-time error.
+   - *Lifetime and non-escape invariants (dangling pointer prevention)*: an allocation site is promoted
+     to a scope region `R` only when all five rules hold; violating any rule falls back to heap RC:
+     - **(R1) No return escape**: the function owning `R` cannot return any pointer into `R` (or any
+       struct/tuple containing one).
+     - **(R2) No outliving store**: a pointer into `R` cannot be stored into any heap object, global
+       slot, container, or **any other region (including an enclosing/outer region)** whose lifetime
+       exceeds `R`. Storing an outer-region pointer into an inner-region object is safe and permitted,
+       because the outer region outlives the inner region; the reverse direction is forbidden.
+     - **(R3) Callee restriction**: a pointer into `R` may only be passed to non-escaping region
+       specializations (e.g. `check__reg(tpa_reg_Node *n)`) that themselves satisfy (R1) and (R2).
+     - **(R4) Destructor-free fields**: every field of a region-allocated class must be a scalar
+       (`int64_t`, `double`, `bool`) or a pointer to a class in the same region `R` (or an enclosing
+       region), so freeing `R`'s chunks requires zero per-object destructors and cannot leak heap
+       references.
+     - **(R5) Library boundary**: `aot-lib` exports never expose region pointers; a library may use a
+       region only for a closed scope created and destroyed entirely inside an exported call.
+   - *Exception safety*: every region-owning function frees `R` exactly once in its single `tp_cleanup:`
+     exit block, covering both normal return and error (`rc != 0`) paths. Exceptions in AOT carry only
+     `(class_id, message_string)` in the thread-local error record (`tpa_exc`), with no traceback frame
+     objects (owner decision D4), so a region pointer can never be retained by an exception or traceback.
+   - *Step 2 as implemented (PR-O2b, N-12b/c; agent proposal, not owner-confirmed)*: regions are
+     intraprocedural. The unit of the decision is `(F, C)`: every non-virtual site of `C` in `F` and every
+     local of `C` in `F` are region-typed together (`struct tpa_reg_<F>__<C>`, one region per `(F, C)`),
+     or none is, so a local has one C type. R1 and R2 as written (a store into a virtual object counts as
+     a heap store); R3 in its strict form, no callee at all (region specialisations such as `check__reg`
+     are a later step, so `binary_trees.py` stays heap-rc with the reason reported); R4 relaxed: a region
+     object's field of class `K` is a region pointer when `(F, K)` is region and an owned heap pointer
+     otherwise, and lists and big ints are owned heap references; a generated per-class walk releases
+     them when the region is freed or reset, which keeps "no heap object points into a region" and adds
+     "a region object's heap references are released". The scope is the function body or one iteration of
+     one loop (the innermost loop whose body holds every use of `C`, in which every local of `C` is
+     definitely assigned before it is read, widened to the loop of any region object that holds pointers
+     of `C`); a per-iteration region is reset at the top of each iteration and freed at `tp_cleanup:`,
+     so `break`, `continue`, `return` and a failing operation need no path-specific code. Heap pointers of
+     `C` flowing into `F` (a parameter, a call result, a field of a heap or virtual object) assigned to a
+     local of `C`, or compared with `is` against a region pointer, make `(F, C)` heap-rc. A class with
+     no fields is never region (review of #501): its region struct would be empty, every
+     `tpa_region_alloc` of size 0 returns the same address, so `a is b` would be true for two objects
+     (and MSVC rejects an empty struct); heap-rc is correct and costs nothing anyone measures. The
+     expression walkers of `aot/alloc.py` and `aot/classes.py` share one list of child attributes
+     (`EXPR_CHILD_ATTRS` / `EXPR_CHILD_SEQS`), so a node such as `NewArray` (`length`, `fill`) or
+     `CallObject` (`callee`) cannot be skipped by one walker and seen by another.
+3. **Reference counting + small cycle collector (D2) + acyclic `__del__`.**
+   - *Pay only for what the program uses*: classes proved acyclic by the shared `aot/classes.py`
+     analysis (PR-O1) keep zero GC overhead and do not link `runtime/tp_aot_gc.h`. Only when a program
+     contains at least one potentially cyclic mutable class is `tp_aot_gc.h` included, and only those
+     cyclic-capable classes carry the GC list header (`prev`, `next`, `gc_refs`).
+   - *Safepoint invariant (borrowed references and RC elision)*: the trial-deletion collector requires
+     that every live cyclic-capable object has at least one counted reference (`rc > 0`) at the moment
+     collection runs. Collection is triggered **only at allocation safepoints** (entry to
+     `tpa_cls_<C>_new` of a cyclic-capable class, after all constructor arguments have been retained as
+     owned temporaries or are held by owned locals/fields in callers). Because every cyclic-capable
+     class is mutable (not `immutable-after-init`), PR-O1's RC elision rules (3) and (4) are
+     automatically disabled for every field of such a class: every field read into a local and every
+     mutable field passed as a call argument is `retain`ed by the caller before any call. Therefore,
+     at every allocation safepoint, no cyclic-capable object is kept alive solely by an uncounted
+     borrowed reference.
+   - *`__del__`*: permitted only on acyclic classes (always exact RC, no virtual/region/elision). A
+     `__del__` on a cyclic-capable class is a compile error (`aot/cycle-del`).
+   - *Step 3 as implemented (PR-O2c; agent proposal, not owner-confirmed)*: the cyclic-capable classes
+     are every class of a strongly connected component of the type graph (edges `C -> D` for a field of
+     type `D` or `D | None`) that has a cycle and at least one member not immutable-after-init: the
+     whole component, not only its mutable members, because trial deletion subtracts only the references
+     between tracked objects, and an untracked class on a cycle would hold a reference that is never
+     subtracted (a root), so the cycle would never be found. An untracked class cannot be on a cycle (its
+     component has none, or is immutable-after-init throughout); its reference to a tracked object is a
+     root while it lives, and it is freed by its count. The header is `tpa_gc_head` (`runtime/tp_aot_gc.h`:
+     `gc_prev`, `gc_next`, `gc_refs`, and `gc_type`, the class's traverse and clear functions, one word the
+     list above did not have), the first member of `struct tpa_cls_<C>` before `rc`, so the collector reads
+     the count through the common prefix `tpa_gc_object`. A region struct `tpa_reg_<F>__<C>` and a virtual
+     object of a cyclic-capable class are unchanged: a region pointer is never counted and never reaches
+     the heap (R2), so a cycle inside a region is freed with the region, and a region object's or virtual
+     object's heap fields are counted (PR-O2a/b), so they are roots. The collector is CPython's one
+     generation of trial deletion over the list of every tracked object alive: `gc_refs = rc` (an atomic
+     load under `TPA_THREADS`); for every tracked object, `traverse` visits its fields of cyclic-capable
+     classes and decrements each referent's `gc_refs`; an object left with `gc_refs > 0` is a root
+     (something outside the tracked set holds it) and the objects it reaches are moved back to the live
+     list; the rest are garbage: each is held by one extra count while its `clear` releases every owned
+     field (tracked objects, acyclic objects, lists, big ints; the slot is emptied before the release) and is
+     freed when its count reaches zero (at once, or when the garbage that still held it is cleared). The
+     pass repeats while it freed something (it ends with a pass that frees nothing): an untracked object
+     that garbage owns is freed by its holder's `clear` and releases the tracked objects it held, a
+     reference that was a root in the pass that freed it, so a cycle held only through such an object
+     (`A -> U -> B1`, `B1 <-> B2`, `U` untracked) is garbage only for the next pass; the repeat is cheaper than
+     tracking every class that reaches a cyclic-capable one, at the price of one extra pass over the
+     tracked list whenever a collection frees anything. No user code runs during a collection (no `__del__` in AOT), so it cannot re-enter; a flag guards it
+     anyway. The safepoint is `tpa_cls_<C>_new` of a cyclic-capable class, before `calloc`: every
+     constructor argument is then an owned temporary, an owned local, a borrowed parameter whose caller
+     holds it, or a field of a live object, and `__init__` has not started; `__init__` allocating another
+     tracked object sees the half-initialised object as a root (held by `_new`'s own local, fields NULL or
+     owned). The elision rules (3) and (4) are off for every field of a cyclic-capable class
+     (`ClassAnalysis.field_elidable`), and `aot/cycle-del` is reported beside the front end's refusal of
+     `__del__`. Trigger: tracked allocations net of tracked frees since the last collection reach
+     `max(TPA_GC_THRESHOLD, live tracked objects after the last collection)` (2000 by default, CPython's
+     first-generation threshold), which bounds the memory held by garbage to one more live set and keeps
+     the amortised cost per allocation constant; `-DTPA_GC_STRESS` collects at every safepoint and
+     `-DTPA_GC_STATS` prints the counts at exit (tests only). One more collection runs after `__main__`
+     returns, when every frame has released its locals and only cycles can remain (CPython's shutdown
+     collection; it keeps LeakSanitizer quiet), and the same collection runs on the `sys.exit` path:
+     `tpa_exit_status` (`runtime/tp_aot.h`) calls `tpa_exit_hook` once before `exit()`, and the generated
+     `main` of a program that links the collector sets it to `tpa_gc_exit` (review of #503, note 2). There
+     the frames still hold their locals; those are counted, so they are roots and stay, and nothing reads
+     an object afterwards; `tpa_exit_int` reads the status before the hook runs. Step 4 holds every garbage
+     object by one extra count before it clears any of them, then drops the extra counts (review of #503,
+     note 3): a clear's release of a garbage referent then only decrements it, so no release cascades from
+     one garbage object into the next and a long garbage chain through a field that is not the release
+     loop's tail field is cleared in constant C stack depth (CPython's `delete_garbage` uses the trashcan
+     for the same reason). A garbage object is referenced only by garbage (a reference from an untracked or
+     reachable object makes it a root), so after every clear its count is the extra one alone and the
+     drop frees it; `-DTP_CHECK_PROVEN` turns the opposite case into a fatal error. Under `TPA_THREADS` the collector's state is thread-local:
+     a tracked object is touched only by the thread that created it (`aot/library-mutable-class` keeps
+     mutable classes, transitively, out of the library boundary; AOT has no mutable globals), so one
+     thread's collection never sees another thread's objects. Tier T's shared objects (section 7) must add
+     the shared-object locking before a tracked object may be shared; this collector is not a
+     stop-the-world collector. The library output never emitted class structs (before this step), so the
+     collector is linked by executables only today; the runtime compiles in both builds.
+4. **Diagnostics (`--explain-alloc` / `aot-check`).**
+   - Every allocation site's chosen strategy (`virtual`, `region`, `heap-rc`, `heap-gc`) and the
+     concrete reason for any fallback from `virtual` or `region` to `heap` (e.g. non-inlined method,
+     R1 return escape, R2 outer-region/heap store, R4 heap-owned field, `__del__`) are reported via
+     `python -m typedpython aot-build ENTRY.py --explain-alloc` (and surfaced in `aot-check`), so
+     measurement runs can verify why an allocation did or did not stay off the heap.
+   - PR-O2c: a heap site of a cyclic-capable class is reported as `heap-gc` with, after the virtual and
+     region reasons, `[gc: <why the class may form a cycle>]` (the mutating store outside `__init__`, or
+     the `self` escape in `__init__`, as `aot/cycle-possible` named it).
+
 ### 6.4 Exceptions
 
 A function returns a status, as the generated C does today; the current exception (class id, message
@@ -416,7 +1107,11 @@ calling rules of AGENTS.md 16.
   decision 2026-11-16, not owner-confirmed): the type vocabulary gained `int_list` (8.2), and its `lists` section has an
   `int_list` entry only for a library whose signatures use that kind; a library with no big-capable list at its boundary
   has the C text, the header and the description it had under version 1, except that `abi_version` is 2 (and the comment
-  at the top of the C text says so).
+  at the top of the C text says so). It is 3 since #443 (tier S2b; agent proposal, not owner-confirmed, the leader
+  decides the shape): the vocabulary gained `dict_i64_i64`, `dict_i64_f64` and `dict_i64_bool` (8.2), and the
+  description a `dicts` object with one entry per dict kind a signature uses (`key`, `value` and the symbols `new`,
+  `set`, `get`, `contains`, `next`, `len`, `retain`, `release`); a library with no dict at its boundary has the C text,
+  the header and the description it had under version 2, except the `abi_version` number.
 
 ### 8.2 Types at the boundary
 
@@ -427,6 +1122,7 @@ calling rules of AGENTS.md 16.
 | `str` | pointer and length of UTF-8 bytes; an argument is borrowed for the call, a result is owned by the caller and released with `<prefix>_free` | `String`, copied at the boundary |
 | `list[float]` / `list[int]`, as an argument and as a result | an opaque counted handle (`<prefix>_f64_list`, `<prefix>_i64_list`) made and read through exported list functions (`_new`, `_len`, `_data`, `_retain`, `_release`); an argument is borrowed for the call, a returned handle is owned by the caller | a class holding the handle, with `DoubleArray` / `LongArray` copied from or to the `_data` address as the app needs |
 | a `list[int]` that the classification finds big-capable (#465), as an argument and as a result | the opaque counted handle `<prefix>_int_list`, with `_new` (n zeros), `_len`, `_retain`, `_release` as above and, because its elements are not `int64_t` in memory, `_get(l, i, &v)` and `_set(l, i, v)` instead of `_data`; both return 0 or -1 with the error record: an index out of range (a negative one counts from the end) is the source language's `IndexError` with its two messages, and `_get` of an element that does not fit `int64_t` fails with an `OverflowError` whose fixed message is "the element of the list does not fit in 64 bits" (nothing is written; after a `_set` of a smaller value the same element reads). Which kind a signature has follows from the classification: a list that crosses the boundary is one group with the outside, so the caller can only pass a handle of the kind the signature names, and a change in a helper that several exports share can change another export's list kind, so a header is regenerated and its callers rebuilt together. The two handle kinds are not interchangeable (a wrong one is memory corruption; only the C types prevent it). `_get` and `_set` take the list's own lock (section 7) | a class holding the handle with `get(i)` / `set(i, v)` (the generator's matching class is the next step) |
+| `dict[int, int]`, `dict[int, float]`, `dict[int, bool]` (#443, tier S2b), as an argument and as a result | the opaque counted handle `<prefix>_dict_i64_i64` / `_dict_i64_f64` / `_dict_i64_bool` (the runtime's `tpa_dict`; its int keys and values are always big-capable inside, so there is no raw / big split) with `_new()` (empty; clears the error record), `_set(d, key, v)`, `_get(d, key, &v)` (a missing key is the source language's `KeyError`, message the key), `_contains(d, key)` (1 or 0), `_next(d, &pos, &key, &v)` (the items in insertion order from `pos = 0`: 1, then 0 at the end), `_len`, `_retain`, `_release`; a key or value outside `int64_t` cannot be read (`OverflowError` "the key of the dict does not fit in 64 bits" / "the value of the dict does not fit in 64 bits", nothing written, `_next` past the item); a NULL handle is `TypeError` "argument 'd' is a null dict handle". The library never writes a dict parameter of an export (`aot/library-dict-write`: a store, `del`, a method that changes it, binding it to another name, holding it in a list, field or dict, or passing it to a callee parameter that is not read-only by the same rule; a callee that returns its parameter is not read-only, an export that returns it gives back the same handle), so one handle may be read and passed to calls from several threads at once; the caller builds a dict with `_new` and `_set` before sharing it (a `_set` racing a reader is the caller's to prevent). str, bool and tuple keys, str, dict and set values, sets and lists of dicts do not cross yet. Agent proposal, not owner-confirmed | `DictI64I64` / `DictI64F64` / `DictI64Bool`, read-only (8.3) |
 | an instance of a compiled class, or any other container | an opaque handle (a counted reference) with `<prefix>_release(handle)` | a Kotlin class holding the handle, released deterministically (`close`) with a cleaner as a safety net |
 | `None` result | `void` | `Unit` |
 
@@ -470,10 +1166,11 @@ not depend on the CPython-embedding library) are leader decisions of 2026-11-16,
 Everything below about the shape of the generated API is an agent proposal, not owner-confirmed.
 
 **What exists (#458, desktop JVM).** `GenerateAotLibraryBindingsTask` in the Gradle plugin reads the
-`<prefix>.json` of 8.1 (`abi_version` must be 2, and every other value, 1 included, fails the task and
-names the supported version: there are no deployed version 1 libraries and the compiler here writes 2 only; a
-type outside the vocabulary, or `int_list` with no `lists.int_list` entry, fails the task and names the
-function) and writes four Kotlin files into one package, five when the library uses `int_list`:
+`<prefix>.json` of 8.1 (`abi_version` must be 3, and every other value, 1 and 2 included, fails the task and
+names the supported version: there are no deployed libraries of an earlier version and the compiler here writes 3
+only; a type outside the vocabulary, `int_list` with no `lists.int_list` entry, or a dict type with no entry under
+`dicts`, fails the task and names the function) and writes four Kotlin files into one package, plus `IntList.kt`
+when the library uses `int_list` and one file per dict kind it uses:
 
 - `AotFfm.kt`, the same text for every library: `TypedPythonAotException(className, message)` and a
   small runtime over `java.lang.foreign` (JDK 21 with `--enable-preview`, or JDK 22 and later). It
@@ -508,6 +1205,13 @@ function) and writes four Kotlin files into one package, five when the library u
   except for the `abi_version` number in the comment of the object file. An `int` result that does not fit in
   64 bits is `OverflowError` "the int result of `<function>` does not fit in 64 bits", through the ordinary
   status check, with no special case in the generator.
+- `DictI64I64.kt`, `DictI64F64.kt`, `DictI64Bool.kt`, one per entry of `dicts` (#443, `abi_version` 3; agent
+  proposal, not owner-confirmed): the Kotlin side of a `dict[int, int | float | bool]`, read-only. It has `size`,
+  `get(key)` (null for a missing key, the library's `KeyError`), `containsKey(key)`, `toMap()` (a `LinkedHashMap` in
+  the insertion order), `of(Map)` (`_new`, then `_set` in the map's iteration order) and `close()` with the ownership
+  rules of the lists. There is no `set`: the library never writes a dict that crossed its boundary, and with no write
+  from Kotlin either, one object may be read and passed to calls from several threads at once. A key or value outside
+  64 bits is the library's `OverflowError`, from `get` and `toMap()`. Every access is one `invokeExact` call.
 
 Out pointers are per-thread scratch memory: one 128-byte block per thread, allocated on first use from
 an automatic arena that the garbage collector frees once the thread is gone. A call costs no
@@ -517,17 +1221,21 @@ The helper and the list classes have fixed names, so each library takes its own 
 **How the fixture uses it.** `python-multiplatform-ksp/fixtures/aot` declares the bindings plugin with
 `apply false` and registers the task class itself, so no KSP, no `PYTHONHOME` staging and no dependency
 on `python-multiplatform` come with it. A front-end-only Python step writes the JSON, the task
-generates Kotlin from it into the test source set, and `python -m typedpython aot-lib` links the
-library as a dependency of the test task only. The test (`fixture.aot.AotLibraryCallTest`) calls
-the `nbody` kernels and a small library of failures and list functions, compares floats bit for bit
-with CPython, checks exception classes and messages, runs two threads, and asserts that no class of
-the CPython-embedding library is on the classpath and that the process loads no libpython (Linux: the
-process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the classpath check only).
+generates Kotlin from it into the test source set (and, via `resourceOutputDirectory`, writes
+`META-INF/native-image/<packageName>/<prefix>/reachability-metadata.json` with every foreign downcall
+descriptor and the `java.lang.foreign` reflection surface for GraalVM native-image without a tracing
+agent), and `python -m typedpython aot-lib` links the library as a dependency of the test task only. The
+test (`fixture.aot.AotLibraryCallTest`) calls the `nbody` kernels and a small library of failures and
+list functions, compares floats bit for bit with CPython, checks exception classes and messages, runs two
+threads, checks that every bound `MethodHandle` descriptor matches the generated metadata, and asserts
+that no class of the CPython-embedding library is on the classpath and that the process loads no
+libpython (Linux: the process's maps; macOS: `vmmap` when it can examine the JVM, otherwise the
+classpath check only). The same 31 scenarios are also compiled by `aotNativeCompile` into a standalone
+GraalVM native image (`AotNativeImageMainKt`, verified by `aotNativeRun` in `.github/workflows/typedpython.yml`
+with `JAVA_HOME` and `PYTHONHOME` removed, #456).
 
 **Not done.** Other platforms (Android `RegisterNatives`, Kotlin/Native cinterop, wasm); packaging of
-the library and the generated Kotlin into an app (waits for the owner decision of #25 step 3); the
-GraalVM native image (#456: the descriptors are not yet declared for native-image registration, so the
-generated wrappers are not shown to work there, and tier K stays open until they are, AGENTS.md 13).
+the library and the generated Kotlin into an app (waits for the owner decision of #25 step 3).
 
 ### 8.4 Python calling Kotlin (the upcall)
 
@@ -591,6 +1299,30 @@ machine and are run by the coordinating session alone, as AGENTS.md requires for
 **Targets** are recorded as ratios to Rust per metric and benchmark (leader decision D9). No ratio is
 fixed in this note: the first recorded numbers are the Rust and default-mode columns, and "near Rust"
 is the owner's phrase.
+
+### 9.1 First recorded Tier K measurements (PR-M1, shared CI runner)
+
+Recorded from CI run `44599101214` (artifact `typedpython-aot-measure-ubuntu`, `#479` / PR `#483`),
+on a **shared GitHub Actions runner** (ratios to Rust only; no absolute-time conclusion is drawn from
+shared-runner runs):
+
+- **Commit**: `497765876cde1c3a9520f478955eb7e21693f057`
+- **Runner image**: `ubuntu26 20261116.202.1`
+- **CPU**: `INTEL(R) XEON(R) PLATINUM 8573C`
+- **Toolchains**: `Python 3.15.2`, `rustc 1.100.0 (0ef1bc386 2026-11-09)` (`--release`, LTO, stripped), `repeat=3`
+
+| Benchmark | Size | AOT stripped | Rust stripped | Size ratio (AOT/Rust) | RSS ratio (AOT/Rust) | CPU ratio (AOT/Rust) | Wall ratio (AOT/Rust) |
+|---|---|---|---|---|---|---|---|
+| `empty` | - | 14,464 B | 287,664 B | 0.050x | 1.000x | 0.733x | 0.788x |
+| `hello` | - | 14,464 B | 290,912 B | 0.050x | 1.000x | 0.834x | 0.816x |
+| `nbody` | 200000 | 47,304 B | 317,800 B | 0.149x | 1.000x | 3.324x | 3.311x |
+| `spectral-norm` | 400 | 55,496 B | 317,384 B | 0.175x | 1.000x | 11.849x | 11.719x |
+| `fannkuch-redux` | 9 | 35,016 B | 295,848 B | 0.118x | 1.000x | 3.284x | 3.279x |
+
+Note on `max_rss_bytes` in this run: every child reported 38,531,072 B (37,628 KiB), which is the
+parent Python process's own resident set inherited across `fork` before `exec` under Linux
+`os.wait4(..., ru_maxrss)`. A follow-up should measure child RSS via `/usr/bin/time -f %M` or
+`posix_spawn` so the child's own RSS is isolated from the harness process.
 
 ## 10. Decisions
 

@@ -69,9 +69,68 @@ class Type(Enum):
     F64_ARRAY = "f64[]"    # a list[float] parameter (ArrayParam) or a local array (NewArray/CopyArray)
     I64_ARRAY = "i64[]"    # a list[int] parameter (ArrayParam) or a local array (NewArray/CopyArray)
     BOOL_ARRAY = "bool[]"  # a numpy np.bool_ buffer parameter only (1-byte items, #261)
+    STR = "str"            # AOT mode only (tier S1, PR-S1a): a Python str, a counted `tpa_str` (runtime/tp_aot_str.h)
+    STR_LIST = "list[str]"  # AOT mode only (tier S1b): a list of str, a counted `tpa_str_list` (fixed length until S2)
+    STR_OPT = "str | None"  # AOT mode only (tier S2a): a `tpa_str *` that is NULL for None
+    BYTES = "bytes"         # AOT mode only (tier S2c): a Python bytes, a counted `tpa_str` of kind 1 whose code points
+    #                         are the bytes (runtime/tp_aot_str.h); a local, a parameter or a return value
+    STR_OPT_LIST = "list[str | None]"  # AOT mode only (tier S2a): a `tpa_str_list` whose items may be NULL (None)
+    OBJ_LIST = "list[obj]"  # AOT mode only (tier S2a): a list of instances of one compiled class, a counted
+    #                         `tpa_obj_list`; the element class is the `cls` of the Param / FieldDecl / return, or
+    #                         `Function.list_classes[name]` for a local
+    DICT = "dict"           # AOT mode only (tier S2b): a counted `tpa_dict` (runtime/tp_aot_dict.h); its key and value
+    #                         types (`DictKinds`) are the `kinds` of the Param, `Function.return_kinds`, the display or
+    #                         copy that makes it, or `Function.dict_kinds[name]` for a local
+    KEY_TUPLE = "tuple key"  # AOT mode only (tier S2b): a tuple made to be a dict key (`ir.KeyTuple`), a counted
+    #                         `tpa_dtup`; it exists only as the key operand of a dict node
+    DICT_LIST = "list[dict]"  # AOT mode only (tier S2b): a list of dicts, a counted `tpa_obj_list` of `tpa_dict`; the
+    #                         dicts' kinds are kept where a DICT's are (the Param's / FieldDecl's `kinds`,
+    #                         `Function.return_kinds`, `Function.dict_kinds[name]`, the display's `kinds`)
 
 
 SCALARS = (Type.I64, Type.F64, Type.BOOL)
+# AOT mode, tier S2b: what a dict holds. A key is an int (I64: always a tagged `tpa_int` in the table, so a big int is a
+# key like any other), a str, or a bool (an I64 key the table marks as a bool: `1 == True`, and the key keeps the type
+# it was first inserted with); a value is an int (tagged), a float, a bool, a str or `str | None` (NULL for None), or a
+# dict, whose own kinds stand in the value's place: `dict[str, dict[int, int]]` is (STR, (I64, I64)). (A dict held by a
+# dict cannot hold that dict back, its type is a part of the outer type: no cycle, so plain reference counts free it.)
+DictKinds = tuple[Type, "Type | DictKinds"]
+DICT_KEYS = (Type.I64, Type.STR, Type.BOOL)
+DICT_VALUES = (Type.I64, Type.F64, Type.BOOL, Type.STR, Type.STR_OPT)
+
+
+def dict_vtype(v: "Type | DictKinds") -> Type:
+    """The type of a value of a dict whose values are `v` (DICT for a dict held as a value)."""
+    return Type.DICT if isinstance(v, tuple) else v
+
+
+def good_dict_kinds(k: object, top: bool = True) -> bool:
+    """`k` is (key type, value type), the value type an allowed scalar or str type or good kinds of a dict (not a
+    set); the key type an allowed key type or a tuple of them (a tuple key, `ir.KeyTuple`). At the top, the value type
+    NONE is a set (`is_set`)."""
+    return (isinstance(k, tuple) and len(k) == 2
+            and (k[0] in DICT_KEYS or (isinstance(k[0], tuple) and len(k[0]) >= 1
+                                       and all(t in DICT_KEYS for t in k[0])))
+            and (k[1] in DICT_VALUES or (top and k[1] is Type.NONE)
+                 or (isinstance(k[1], tuple) and good_dict_kinds(k[1], top=False))))
+
+
+def is_set(k: object) -> bool:
+    """AOT mode, tier S2b: the kinds `k` of a DICT are those of a set (`set[T]`: the elements are the keys, the value
+    type is NONE, no value is ever read)."""
+    return isinstance(k, tuple) and len(k) == 2 and k[1] is Type.NONE
+
+
+def view_match(view: str | None, a: "DictKinds", b: "DictKinds") -> bool:
+    """The views `view` ("keys", "values", "items"; None: the dicts themselves) of dicts of kinds `a` and `b` read the
+    same: the keys of a keys view, the values of a values view, both otherwise. A `KeysView[K]` does not say the
+    values of its dict, nor a `ValuesView[V]` its keys (tier S2b)."""
+    return a[0] == b[0] if view == "keys" else a[1] == b[1] if view == "values" else a == b
+
+
+def dict_has_float(k: "DictKinds") -> bool:
+    """A float is among the values of `k` or of the dicts it holds."""
+    return k[1] is Type.F64 or (isinstance(k[1], tuple) and dict_has_float(k[1]))
 # INT is not a scalar: it owns a reference when promoted. It is created only by `ToInt`, by arithmetic
 # on INTs, and by a redo `Call` of an i64-returning callee, and it becomes an object only through `Box`.
 ARRAYS = (Type.F64_ARRAY, Type.I64_ARRAY, Type.BOOL_ARRAY)
@@ -98,6 +157,20 @@ class Const(Expr):
     # which never sets it, sees the node it always saw.
     name: str | None = field(default=None, kw_only=True, compare=False, repr=False)
 
+    def __eq__(self, other: object) -> bool:
+        if type(self) is not type(other):
+            return NotImplemented
+        if self.type != other.type:
+            return False
+        if (isinstance(self.value, float) and isinstance(other.value, float)
+                and self.value != self.value and other.value != other.value):
+            return True
+        return self.value == other.value
+
+    def __hash__(self) -> int:
+        v = "nan" if isinstance(self.value, float) and self.value != self.value else self.value
+        return hash((self.type, v))
+
 
 @dataclass(frozen=True)
 class Local(Expr):
@@ -118,6 +191,7 @@ class BinOpKind(Enum):
     AND = "&"              # SPEC N-16: I64, INT and OBJ operands
     OR = "|"
     XOR = "^"
+    POW = "**"             # AOT mode (Tier K PR5): I64 and F64 operands
 
 
 @dataclass(frozen=True)
@@ -284,12 +358,29 @@ class MathFunc(Enum):
     SQRT = "sqrt"
     EXP = "exp"
     LOG = "log"
+    LOG2 = "log2"
+    LOG10 = "log10"
     SIN = "sin"
     COS = "cos"
     TAN = "tan"
+    ASIN = "asin"
+    ACOS = "acos"
+    ATAN = "atan"
     ATAN2 = "atan2"
+    SINH = "sinh"
+    COSH = "cosh"
+    TANH = "tanh"
     FABS = "fabs"
     HYPOT = "hypot"
+    POW = "pow"
+    COPYSIGN = "copysign"
+    FMOD = "fmod"
+    ISNAN = "isnan"
+    ISINF = "isinf"
+    ISFINITE = "isfinite"
+    FLOOR = "floor"
+    CEIL = "ceil"
+    TRUNC = "trunc"
 
 
 @dataclass(frozen=True)
@@ -615,6 +706,182 @@ class StoreIndex(Stmt):
     proven: bool = False      # as in Index
 
 
+# --- AOT mode, tier S2a: lists that change length (design 4.3.2). `array` names a `list[float]` / `list[int]` local or
+# parameter (as Index); every alias of the list sees the change. A program with any of these on a list type gives that
+# type the growable layout (the emitter's `TPA_GROW_*` define).
+
+@dataclass(frozen=True)
+class ListAppend(Stmt):
+    """`array.append(value)`."""
+
+    array: str
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ListInsert(Stmt):
+    """`array.insert(index, value)`: CPython's clamping (a negative index counts from the end, then 0 and len are the
+    limits; never an error)."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ListExtend(Stmt):
+    """`array.extend(other)` and `array += other` (in place, the same object); `other` is a list name of the same type,
+    possibly `array` itself (CPython copies the items first, so the list doubles)."""
+
+    array: str
+    other: str
+
+
+@dataclass(frozen=True)
+class ListClear(Stmt):
+    """`array.clear()`."""
+
+    array: str
+
+
+@dataclass(frozen=True)
+class ListSort(Stmt):
+    """`array.sort(reverse=...)` (tier S2c): CPython's listsort without a key (tp_aot.h `TPA__DEF_SORT`), of a list of
+    int, float or str. `reverse` is BOOL, evaluated before the sort."""
+
+    array: str
+    reverse: Expr
+
+
+@dataclass(frozen=True)
+class ListSortKeyed(Stmt):
+    """The keyed sort of tier S2c (comprehensions.py `KEYSORT`): `keys` (a list of int, float or str, one key per item,
+    computed before) gives the order; CPython's listsort sorts the (key, position) pairs by key only (tp_aot.h
+    `tpa_keysort_*`), reversed before and after when `reverse` (BOOL, evaluated first) is true, and every list of
+    `arrays` (one list, or the element lists of a list of tuples, each as long as `keys`) is permuted by the result:
+    what list_sort_impl does moving the keys and the items together. A list whose length is no longer the keys'
+    raises CPython's ValueError("list modified during sort")."""
+
+    keys: str
+    reverse: Expr
+    arrays: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ListReverse(Stmt):
+    """`array.reverse()`."""
+
+    array: str
+
+
+@dataclass(frozen=True)
+class ListPop(Expr):
+    """`array.pop()` / `array.pop(index)`: the element, removed. IndexError("pop from empty list") on an empty list,
+    else IndexError("pop index out of range") for an index outside it (a negative index counts from the end)."""
+
+    array: str
+    index: Expr | None
+
+
+@dataclass(frozen=True)
+class ListSearch(Expr):
+    """`array.index(value)` (I64), `array.count(value)` (I64), `value in array` (BOOL), on a `list[int]` only (a
+    `list[float]` search depends on object identity for NaN in CPython, so it has no AOT form: `aot/identity`).
+    `index`: ValueError("list.index(x): x not in list") when absent (CPython 3.14 and later)."""
+
+    op: str                    # "index" | "count" | "in"
+    array: str
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ListRemove(Stmt):
+    """`array.remove(value)` on a `list[int]`: the first equal element; ValueError("list.remove(x): x not in list")."""
+
+    array: str
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ListConcat(Expr):
+    """`left + right` of two list names of one type: a new list (type: the list type)."""
+
+    left: str
+    right: str
+
+
+@dataclass(frozen=True)
+class ListRepeat(Expr):
+    """`src * count` (`count_first`: `count * src`, CPython evaluates the count first then): a new list; a count of
+    0 or less gives an empty list, a size past the largest list MemoryError."""
+
+    src: str
+    count: Expr
+    count_first: bool = False
+
+
+@dataclass(frozen=True)
+class ListSlice(Expr):
+    """`src[start:stop:step]` (a missing bound is None; all None is `list(src)` / `src[:]` of a list[str]): a new list,
+    PySlice_AdjustIndices; ValueError("slice step cannot be zero")."""
+
+    src: str
+    start: Expr | None
+    stop: Expr | None
+    step: Expr | None
+
+
+LIST_MAKERS = (ListConcat, ListRepeat, ListSlice)
+
+
+@dataclass(frozen=True)
+class ListDelete(Stmt):
+    """`del array[index]` (IndexError("list assignment index out of range")) or, with `is_slice`, `del
+    array[start:stop:step]` (a missing bound is None)."""
+
+    array: str
+    index: Expr | None
+    start: Expr | None = None
+    stop: Expr | None = None
+    step: Expr | None = None
+    is_slice: bool = False
+
+
+@dataclass(frozen=True)
+class ListSetSlice(Stmt):
+    """`array[start:stop:step] = other` (`other` a list name of the same type, possibly `array`: its items are copied
+    first). A step other than 1 needs equal sizes: ValueError("attempt to assign sequence of size N to extended slice
+    of size M")."""
+
+    array: str
+    start: Expr | None
+    stop: Expr | None
+    step: Expr | None
+    other: str
+
+
+@dataclass(frozen=True)
+class ListCompare(Expr):
+    """`left op right` of two lists of one type, list[int] or list[str] (a list of float compares items by identity
+    first in CPython: aot/identity). Objects/listobject.c list_richcompare: the first index where the items differ
+    decides (`==` false, `!=` true, else that pair compared by `op`); with none, the lengths are compared. Type BOOL."""
+
+    op: CompareKind
+    left: str
+    right: str
+
+
+@dataclass(frozen=True)
+class ListStr(Expr):
+    """`str(array)` / `repr(array)` (the same text for a list), also for print and an f-string field. Type STR."""
+
+    array: str
+
+
+LIST_GROW_NODES = (ListAppend, ListInsert, ListExtend, ListSetSlice)
+LIST_SHRINK_NODES = (ListPop, ListClear, ListRemove, ListDelete, ListSetSlice)
+
+
 @dataclass(frozen=True)
 class FieldSet(Stmt):
     """`obj.field = value` on a proved-exact compiled class (as FieldGet). An effect, unless `obj` is
@@ -672,6 +939,10 @@ class Print(Stmt):
     call) and the verifier rejects it unless asked for AOT mode (`verify.verify(m, aot=True)`)."""
 
     args: tuple[Expr, ...]
+    # Tier S1 (PR-S1a): `sep=` and `end=` (STR expressions, evaluated after the positional arguments, in source
+    # order, as CPython evaluates a call's arguments); None: a space and a newline. An argument may be STR.
+    sep: Expr | None = None
+    end: Expr | None = None
 
 
 # --- AOT-only nodes (SPEC N-17, #451; agent proposal, not owner-confirmed) -----------------------------
@@ -702,6 +973,17 @@ class Cond(Expr):
 
 
 @dataclass(frozen=True)
+class TupleIndex(Expr):
+    """`t[i]` of a split tuple (AOT mode, tier S2a, `typedpython/tuples.py`): the index, then the element chosen from
+    `elements` (reads of the element locals, all of the node's type: a scalar or a str), with CPython's tuple rules: a
+    negative index counts from the end; out of range -> IndexError("tuple index out of range"). Only the chosen
+    element is read."""
+
+    index: Expr                # I64
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
 class ArgvInt(Expr):
     """`int(sys.argv[index])` (type I64), `index` I64. CPython's `int()` of a string can be any int, so the AOT
     back end holds its value as a big-integer-capable (TAGGED) int (`aot/rep.py`, #462); under `--strict-int` it
@@ -717,6 +999,64 @@ class ArgvLen(Expr):
 
 
 @dataclass(frozen=True)
+class FloatToInt(Expr):
+    """`int(float_expr)` (type I64, AOT mode): truncates toward zero, big-int capable (TAGGED)."""
+
+    operand: Expr
+
+
+@dataclass(frozen=True)
+class BoolToInt(Expr):
+    """`int(bool_expr)` (type I64, AOT mode): 0 or 1."""
+
+    operand: Expr
+
+
+@dataclass(frozen=True)
+class StrToInt(Expr):
+    """`int("literal")` (type I64, AOT mode): parsed at runtime with Python's base-10 int parser (TAGGED)."""
+
+    text: str
+
+
+class TimeFunc(Enum):
+    PERF_COUNTER = "perf_counter"
+    MONOTONIC = "monotonic"
+    TIME = "time"
+
+
+@dataclass(frozen=True)
+class TimeCall(Expr):
+    """`time.<func>()` (type F64, AOT mode)."""
+
+    func: TimeFunc
+
+
+@dataclass(frozen=True)
+class TimeSleep(Stmt):
+    """`time.sleep(seconds)` (AOT mode). `seconds` is F64."""
+
+    seconds: Expr
+
+
+@dataclass(frozen=True)
+class Raise(Stmt):
+    """AOT mode, tier S2c: raise the builtin exception `kind` (a `TPA_` kind of the runtime, "ValueError") with the
+    fixed message CPython gives it where a rewrite of the AST stands for a builtin that raises (`min()` of an empty
+    iterable: "min() iterable argument is empty"). Not a `raise` statement of the program, which stays refused."""
+
+    kind: str
+    message: str
+
+
+@dataclass(frozen=True)
+class SysExit(Stmt):
+    """`sys.exit([code])` (AOT executable mode only; refused in `aot-lib`). `code` is I64 or None."""
+
+    code: Expr | None = None
+
+
+@dataclass(frozen=True)
 class FormatField(Expr):
     """One replacement field of an f-string given to `print`, in an `FString` (type OBJ, no use
     elsewhere). `value` is I64, F64 or BOOL. `precision` None: `str(value)` (what `print(value)`
@@ -724,15 +1064,630 @@ class FormatField(Expr):
 
     value: Expr
     precision: int | None = None
+    # Tier S1 (PR-S1a): `{x!r}` (True: `repr(value)`); `value` may then also be STR, and a STR value without it
+    # is the string itself (`{s}`).
+    repr: bool = False
 
 
 @dataclass(frozen=True)
 class FString(Expr):
-    """A formatted string argument of `Print` (type OBJ; nowhere else, it is not a string value):
-    `parts` are `Const` OBJ strs and `FormatField`s, written one after another with nothing between.
-    Every field is evaluated, in order, before any part is written."""
+    """A formatted string: as an argument of `Print`, type OBJ (written part by part, or made in full first when a
+    part can fail to encode); anywhere else (tier S1), type STR, the string the parts make. `parts` are str `Const`s
+    and `FormatField`s, one after another with nothing between. Every field is evaluated, in order, before any part
+    is written or the string is made."""
 
     parts: tuple[Expr, ...]
+
+
+# --- Tier S1 (PR-S1a) string nodes (AOT mode only; docs/design/typedpython-aot.md 4.3.1) -------------------
+#
+# A STR value is a counted `tpa_str`. Each node below evaluates its operands left to right, as CPython does, and
+# raises CPython's exception with its message where CPython raises one. An `FString` of type STR (anywhere but a
+# `Print` argument, where it stays OBJ and is written piece by piece) is the string its parts make.
+
+@dataclass(frozen=True)
+class StrConcat(Expr):
+    """`left + right` of two STR (type STR), or of two BYTES (tier S2c, type BYTES). `s += t` on a STR name is `Assign(s, StrConcat(Local s, t))`; the back
+    end grows the name's string in place when nothing else holds it (design 4.3.1, the ownership rule)."""
+
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class StrRepeat(Expr):
+    """`value * count` or `count * value` (type STR, or BYTES of a BYTES value: tier S2c); `value` STR, `count` I64. `count_first`: the int was the
+    left operand (it is evaluated first)."""
+
+    value: Expr
+    count: Expr
+    count_first: bool = False
+
+
+@dataclass(frozen=True)
+class StrCompare(Expr):
+    """`left <op> right` of two STR, or of two BYTES (tier S2c), (type BOOL): equality by content, order by code point
+    (for bytes, by unsigned byte)."""
+
+    op: CompareKind
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class StrContains(Expr):
+    """`needle in hay` (`negate`: `not in`) of two STR or two BYTES (tier S2c) (type BOOL); `needle` is evaluated
+    first."""
+
+    needle: Expr
+    hay: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class StrLen(Expr):
+    """`len(value)` of a STR or a BYTES (type I64, in [0, 2**62])."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrIndex(Expr):
+    """`value[index]` (type STR); `index` I64 (an int outside 64 bits is CPython's IndexError)."""
+
+    value: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class StrSlice(Expr):
+    """`value[start:stop:step]` of a STR (type STR) or a BYTES (type BYTES); each bound I64 or None (absent), evaluated in that order."""
+
+    value: Expr
+    start: Expr | None
+    stop: Expr | None
+    step: Expr | None
+
+
+@dataclass(frozen=True)
+class StrOf(Expr):
+    """`str(value)` or (`repr`) `repr(value)` of an I64, F64, BOOL or STR (type STR); of a BYTES both are `b'...'`."""
+
+    value: Expr
+    repr: bool = False
+
+
+@dataclass(frozen=True)
+class BytesIndex(Expr):
+    """`value[index]` of a BYTES (tier S2c, type I64 in [0, 255]); `index` I64 (an int outside 64 bits is CPython's
+    IndexError), CPython's IndexError("index out of range")."""
+
+    value: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class BytesContainsInt(Expr):
+    """`needle in hay` (`negate`: `not in`) of an I64 needle and a BYTES hay (tier S2c, type BOOL); a needle outside
+    range(0, 256) is CPython's ValueError("byte must be in range(0, 256)"). `needle` is evaluated first."""
+
+    needle: Expr
+    hay: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class StrEncode(Expr):
+    """`value.encode()` / `value.encode("utf-8")` of a STR (tier S2c, type BYTES): strict UTF-8, a surrogate is
+    CPython's UnicodeEncodeError."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class BytesDecode(Expr):
+    """`value.decode()` / `value.decode("utf-8")` of a BYTES (tier S2c, type STR): strict UTF-8, CPython's
+    UnicodeDecodeError with its reason and range."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class BytesNew(Expr):
+    """`bytes(count)` (tier S2c, type BYTES): `count` zero bytes, `count` I64; a negative count is CPython's
+    ValueError("negative count")."""
+
+    count: Expr
+
+
+@dataclass(frozen=True)
+class BytesFromList(Expr):
+    """`bytes(array)` of a list[int] local or parameter (tier S2c, type BYTES); an item outside range(0, 256) is
+    CPython's ValueError("bytes must be in range(0, 256)")."""
+
+    array: str
+
+
+@dataclass(frozen=True)
+class BytesDisplay(Expr):
+    """`bytes([e0, e1, ...])` of I64 items (tier S2c, type BYTES): every item is evaluated, left to right, then the
+    first outside range(0, 256) is CPython's ValueError("bytes must be in range(0, 256)")."""
+
+    items: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class StrOrd(Expr):
+    """`ord(value)` of a STR (type I64, in [0, 0x10FFFF])."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrChr(Expr):
+    """`chr(value)` of an I64 (type STR)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ArgvStr(Expr):
+    """`sys.argv[index]` (type STR), `index` I64: the argument as CPython decodes it."""
+
+    index: Expr
+
+
+@dataclass(frozen=True)
+class StrParseInt(Expr):
+    """`int(value)` of a STR (type I64, TAGGED: any int CPython parses)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrWrite(Expr):
+    """`sys.stdout.write(value)` or (`err`) `sys.stderr.write(value)` of a STR (type I64: `len(value)`, as the text
+    stream returns)."""
+
+    value: Expr
+    err: bool = False
+
+
+@dataclass(frozen=True)
+class StrMethod(Expr):
+    """`recv.<name>(args)` of a STR receiver (tier S1b): split, join, strip, lstrip, rstrip, lower, upper,
+    startswith, endswith, find, replace, isalpha, isdigit (design 4.3.1). `args` are the arguments in order, None for
+    a `None` argument (`split(None, 2)`, `strip(None)`); `startswith` / `endswith` given a tuple have each element
+    as an argument and `any_of` True. The receiver is evaluated first, then the arguments in source order: for
+    startswith / endswith the layout is (start, end, prefix...), and the prefixes (the source's first argument) are
+    evaluated before start and end."""
+
+    recv: Expr
+    name: str
+    args: tuple[Expr | None, ...]
+    any_of: bool = False
+
+
+@dataclass(frozen=True)
+class StrNarrow(Expr):
+    """A read of a STR_OPT value the front end has proved is not None (tier S2a, design 4.3.2): type STR, no runtime
+    work (`-DTP_CHECK_PROVEN` aborts on None, so the sanitizer job checks every proof)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrListDisplay(Expr):
+    """`[s0, s1, ...]` of STR expressions (type STR_LIST, tier S1b), or of STR and STR_OPT ones (type STR_OPT_LIST, tier
+    S2a: a None item is NULL); empty only where a list of str is expected
+    (`x: list[str] = []`, `sep.join([])`)."""
+
+    elts: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class StrListLen(Expr):
+    """`len(value)` of a STR_LIST (type I64)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrListIndex(Expr):
+    """`value[index]` of a STR_LIST (type STR); list semantics and IndexError("list index out of range")."""
+
+    value: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class ObjListDisplay(Expr):
+    """`[a, b, ...]` of instances of the compiled class `cls` (type OBJ_LIST, tier S2a); empty only where a list of
+    `cls` is expected (`x: list[C] = []`, an argument for a list[C] parameter)."""
+
+    cls: str
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class ObjListLen(Expr):
+    """`len(value)` of an OBJ_LIST (type I64)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ObjListIndex(Expr):
+    """`value[index]` of an OBJ_LIST of `cls` (type OBJ, an instance of `cls`, a new reference); list semantics."""
+
+    value: Expr
+    index: Expr
+    cls: str
+
+
+@dataclass(frozen=True)
+class ObjListStore(Stmt):
+    """`array[index] = value` of an OBJ_LIST local or parameter: the value, then the index, as CPython evaluates
+    them; IndexError("list assignment index out of range")."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class StrListStore(Stmt):
+    """`array[index] = value` of a STR_LIST local or parameter (tier S2a): the value, then the index, as CPython
+    evaluates them; IndexError("list assignment index out of range"). The list takes a new reference to the value and
+    releases the item it replaces."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ForObjList(Stmt):
+    """`for var in value:` over an OBJ_LIST: the list is held for the loop (CPython's iterator), its length read
+    before every step; `var` (an OBJ local of the element class) takes each item in turn."""
+
+    var: str
+    value: Expr
+    body: tuple[Stmt, ...]
+
+
+# --- AOT mode, tier S2b: dict[K, V] (runtime/tp_aot_dict.h; design 4.3.2 "dict and set") ---------------------------
+#
+# A dict operand (`dict`, `value`, `left`, `right`, `other`) is an expression of type DICT. A key is an expression of
+# the dict's key type, or a BOOL looking up a dict of int (`d[True]` finds key 1, and a KeyError prints `True`; a bool
+# is never inserted into a dict of int, see ForDict); a value is of the dict's value type exactly (CPython keeps the
+# object stored, so a bool in a dict of int or an int in a dict of float is refused by the front end, not converted).
+# Every node raises what CPython raises, with its message: KeyError(repr(key)), RuntimeError for a loop whose dict
+# changed size.
+
+@dataclass(frozen=True)
+class DictDisplay(Expr):
+    """`{k0: v0, k1: v1, ...}` (type DICT) of `kinds`; `keys[i]` pairs with `values[i]`, evaluated k0, v0, k1, v1, ...
+    as CPython does. The table is presized as CPython's BUILD_MAP of the display's bytecode presizes it (the back end
+    mirrors the compiler's chunking), so a later loop that changes the dict sees CPython's layout."""
+
+    kinds: DictKinds
+    keys: tuple[Expr, ...]
+    values: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class DictGet(Expr):
+    """`dict[key]` (`default` None, `get` False: KeyError(repr(key)) when absent), `dict.get(key, default)` (`get`
+    True), or `dict.get(key)` of a dict of str or `str | None` (`get` True, `default` None: type STR_OPT, None when
+    absent). Type: the dict's value type (STR_OPT for a `get` without a default)."""
+
+    dict: Expr
+    key: Expr
+    default: Expr | None = None
+    get: bool = False
+
+
+@dataclass(frozen=True)
+class DictContains(Expr):
+    """`key in dict` (`negate`: `not in`); type BOOL. The key is evaluated first, as CPython evaluates `a in b`."""
+
+    key: Expr
+    dict: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class DictLen(Expr):
+    """`len(dict)`; type I64."""
+
+    dict: Expr
+
+
+@dataclass(frozen=True)
+class DictPop(Expr):
+    """`dict.pop(key)` (KeyError(repr(key)) when absent) or `dict.pop(key, default)`; type: the dict's value type."""
+
+    dict: Expr
+    key: Expr
+    default: Expr | None = None
+
+
+@dataclass(frozen=True)
+class DictSetDefault(Expr):
+    """`dict.setdefault(key, default)`: the value under `key`, `default` inserted when absent; type: the value type."""
+
+    dict: Expr
+    key: Expr
+    default: Expr
+
+
+@dataclass(frozen=True)
+class DictCopy(Expr):
+    """`dict.copy()` or `dict(d)` (type DICT, the same `kinds`): CPython's copy, holes kept or compacted as it does."""
+
+    kinds: DictKinds
+    value: Expr
+
+
+@dataclass(frozen=True)
+class DictCompare(Expr):
+    """`left == right` (`negate`: `!=`) of two dicts of the same kinds; type BOOL."""
+
+    left: Expr
+    right: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class DictStr(Expr):
+    """`str(dict)` / `repr(dict)` / `{dict}` in an f-string / `print(dict)`: CPython's repr; type STR. `value` is a DICT
+    or a DICT_LIST (a list of dicts, its list_repr)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class DictStore(Stmt):
+    """`dict[key] = value`: `value` first, then `dict`, then `key`, as CPython evaluates a subscript store."""
+
+    dict: Expr
+    key: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class DictDelete(Stmt):
+    """`del dict[key]` (KeyError(repr(key)) when absent)."""
+
+    dict: Expr
+    key: Expr
+
+
+@dataclass(frozen=True)
+class DictUpdate(Stmt):
+    """`dict.update(other)` of a dict of the same kinds (CPython's dict_dict_merge)."""
+
+    dict: Expr
+    other: Expr
+
+
+@dataclass(frozen=True)
+class DictClear(Stmt):
+    """`dict.clear()`."""
+
+    dict: Expr
+
+
+@dataclass(frozen=True)
+class ForDict(Stmt):
+    """`for key_var in dict` / `in dict.keys()` (`value_var` None), `for value_var in dict.values()` (`key_var` None),
+    `for key_var, value_var in dict.items()`: the dict is held for the loop (CPython's iterator), and each step is
+    CPython's `next`: RuntimeError("dictionary changed size during iteration") when the length differs from the one
+    at the start, "dictionary keys changed during iteration" when more entries come than it held. `kinds` are the
+    dict's; the variables are locals of the key type and of the value type. (A dict of int never holds a bool key:
+    the front end refuses a bool key where one could be inserted, so the loop yields ints.)"""
+
+    kinds: DictKinds
+    value: Expr
+    key_var: "str | tuple[str, ...] | None"     # (a tuple of names: a tuple key, one name per element)
+    value_var: str | None
+    body: tuple[Stmt, ...]
+
+
+@dataclass(frozen=True)
+class DictPopItem(Stmt):
+    """`key_var, value_var = dict.popitem()` (both None: `dict.popitem()` as a statement): the last entry is removed
+    and its key and value bound, left to right; an empty dict raises KeyError('popitem(): dictionary is empty'). The
+    entry count is truncated to the removed entry, nothing becomes usable (CPython's dict_popitem_impl), so a key
+    inserted next takes its place. `kinds` are the dict's; the variables are locals of the key and of the value type."""
+
+    kinds: DictKinds
+    dict: Expr
+    key_var: "str | tuple[str, ...] | None"     # (a tuple of names: a tuple key, one name per element)
+    value_var: str | None
+
+
+@dataclass(frozen=True)
+class KeyTuple(Expr):
+    """`(a, b, ...)` as the key of a dict whose keys are tuples (type KEY_TUPLE): the elements evaluated in order, then
+    a new tuple of them. Only a dict node's key operand. (A tuple read out of such a dict is bound to one name per
+    element: `ForDict.key_var` / `DictPopItem.key_var` is then a tuple of names.)"""
+
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class DictListDisplay(Expr):
+    """`[d0, d1, ...]` of dicts of `kinds` (type DICT_LIST), each element evaluated in order; the list holds a new
+    reference to each (`[{}]`: a new dict; `[d]`: the dict `d` itself, shared). Empty only where a list of dicts of
+    `kinds` is wanted."""
+
+    kinds: DictKinds
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class DictListLen(Expr):
+    """`len(value)` of a DICT_LIST (type I64)."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class DictListIndex(Expr):
+    """`value[index]` of a DICT_LIST (type DICT, the dict itself, a new reference); list semantics, IndexError("list
+    index out of range")."""
+
+    value: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class DictListStore(Stmt):
+    """`array[index] = value` of a DICT_LIST local or parameter: the value, then the index (CPython's order);
+    IndexError("list assignment index out of range")."""
+
+    array: str
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ForDictList(Stmt):
+    """`for var in value:` over a DICT_LIST: the list is held for the loop, its length read before every step; `var` (a
+    DICT local of the list's kinds) takes each dict in turn."""
+
+    var: str
+    value: Expr
+    body: tuple[Stmt, ...]
+
+
+def dict_bound(s: "ForDict | DictPopItem") -> list[tuple[object, "Type | DictKinds"]]:
+    """The names a ForDict or a DictPopItem binds, each with the type it takes (a tuple key: one name per element, of
+    the element's type), keys first. Tolerates a malformed node (the verifier reports it)."""
+    out: list[tuple[object, Type | DictKinds]] = []
+    kinds = s.kinds if isinstance(s.kinds, tuple) and len(s.kinds) == 2 else (None, None)
+    kt, vt = kinds
+    if isinstance(s.key_var, tuple):
+        out += list(zip(s.key_var, kt if isinstance(kt, tuple) else ()))
+    elif s.key_var is not None:
+        out.append((s.key_var, kt))
+    if s.value_var is not None:
+        out.append((s.value_var, vt))
+    return out
+
+
+@dataclass(frozen=True)
+class DictHasValue(Expr):
+    """`value in dict.values()` / `not in` (negate), the value first (type BOOL): some value of the dict equals it
+    (identity first in CPython: never a float value here)."""
+
+    value: Expr
+    dict: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class DictHasItem(Expr):
+    """`(key, value) in dict.items()` / `not in` (negate): the key, the value, then the dict (type BOOL): the key is
+    found and its value equals `value` (never a float value here)."""
+
+    key: Expr
+    value: Expr
+    dict: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class DictView(Expr):
+    """`d.keys()` / `d.values()` / `d.items()` (`view`) bound to a view name (type DICT): the view holds the dict
+    itself (a new reference), so it shows the dict as it is when it is used, and keeps that dict when the dict's name
+    is bound again (CPython's view objects). Only the value of an Assign to a view local (tier S2b)."""
+
+    view: str                      # "keys", "values", "items"
+    dict: Expr
+
+
+@dataclass(frozen=True)
+class DictViewStr(Expr):
+    """The repr of `dict.keys()` / `.values()` / `.items()` (`view`), `dict_keys(['a'])` ... (type STR)."""
+
+    view: str                      # "keys", "values", "items"
+    dict: Expr
+
+
+@dataclass(frozen=True)
+class SetFromList(Expr):
+    """`set(array)` of a list[str] or a list[int] local or parameter (type DICT, set kinds): each item added in the
+    list's order."""
+
+    kinds: DictKinds
+    array: str
+
+
+@dataclass(frozen=True)
+class SetDisplay(Expr):
+    """`{e0, e1, ...}` / `set()` (type DICT, set kinds `(T, NONE)`): the elements evaluated in order, each added (an
+    element equal to one already there is not: the first is kept)."""
+
+    kinds: DictKinds
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class SetOp(Expr):
+    """`left | right`, `&`, `-`, `^` (and union / intersection / difference / symmetric_difference of one set) of two
+    sets of the same kinds: a new set (type DICT)."""
+
+    op: str                        # "|", "&", "-", "^"
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class SetCompare(Expr):
+    """`left <= right`, `<`, `>=`, `>` (issubset / issuperset) and `left.isdisjoint(right)` ("disjoint") of two sets of
+    the same kinds (type BOOL)."""
+
+    op: str                        # "<=", "<", ">=", ">", "disjoint"
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class SetAdd(Stmt):
+    """`set.add(key)`: the set, then the key (a bool is never added to a set of int, as for a dict key)."""
+
+    set: Expr
+    key: Expr
+
+
+@dataclass(frozen=True)
+class SetRemove(Stmt):
+    """`set.remove(key)` (KeyError(repr(key)) when absent) / `set.discard(key)` (`discard`: nothing when absent)."""
+
+    set: Expr
+    key: Expr
+    discard: bool
+
+
+DICT_EXPRS = (DictDisplay, DictGet, DictContains, DictLen, DictPop, DictSetDefault, DictCopy, DictCompare, DictStr,
+              DictListDisplay, DictListLen, DictListIndex, KeyTuple, SetDisplay, SetOp, SetCompare, DictHasValue,
+              DictHasItem, DictViewStr, DictView, SetFromList)
+DICT_STMTS = (DictStore, DictDelete, DictUpdate, DictClear, ForDict, DictPopItem, DictListStore, ForDictList, SetAdd,
+              SetRemove)
+
+
+@dataclass(frozen=True)
+class ForStr(Stmt):
+    """`for var in value:` over a STR: `value` is evaluated once and held for the loop (rebinding its name in the body
+    does not change what is iterated); `var` (a STR local) takes each one-character string in turn. After the loop
+    `var` keeps its last value."""
+
+    var: str
+    value: Expr
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True)
@@ -846,6 +1801,8 @@ class Param:
     # `type(x) is C` (or `x is None` too when `optional`), deopting before any effect otherwise.
     cls: str | None = None
     optional: bool = False
+    kinds: DictKinds | None = None      # AOT mode, tier S2b: the key and value types of a DICT parameter
+    view: str | None = None             # ... and of a view parameter ("keys", "values", "items"): it holds the dict
 
 
 @dataclass(frozen=True)
@@ -963,6 +1920,16 @@ class Function:
     # After the loop entries, a function with an effect that holds list copies has one statement
     # entry (`Resume.stmt` set) per source statement holding a Call (#390 item 5, statement exits).
     resumes: tuple["Resume", ...] = ()
+    # AOT mode (SPEC N-17, #486): return class (C or C | None) and local variable classes.
+    return_cls: str | None = None
+    return_optional: bool = False
+    local_classes: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    # AOT mode, tier S2a: the element class of every OBJ_LIST local (a list of instances of that class)
+    list_classes: dict[str, str] = field(default_factory=dict)
+    # AOT mode, tier S2b: the key and value types of every DICT local and parameter, and of a DICT return
+    dict_kinds: dict[str, DictKinds] = field(default_factory=dict)
+    return_kinds: DictKinds | None = None
+    return_view: str | None = None      # a returned view ("keys", ...): the DICT returned is the view's dict
 
 
 @dataclass(frozen=True)
@@ -993,6 +1960,17 @@ class Resume:
 
 
 @dataclass(frozen=True)
+class FieldDecl:
+    """One typed field of a compiled class (AOT mode, SPEC N-17, #486)."""
+
+    name: str
+    type: Type
+    cls: str | None = None
+    optional: bool = False
+    kinds: DictKinds | None = None      # tier S2b: the key and value types of a DICT field
+
+
+@dataclass(frozen=True)
 class ClassDecl:
     """A compiled fixed-layout class (SPEC N-11): `__slots__` written by the user equal to its
     annotated fields, base object, no metaclass, no decorator but @compiled. The module init checks
@@ -1005,6 +1983,7 @@ class ClassDecl:
     # The class defines `__del__` (a finalizer): its objects are never placed in a region (SPEC N-12b),
     # freeing a region would skip the finalizer.
     has_del: bool = False
+    field_decls: tuple[FieldDecl, ...] = ()
 
 
 @dataclass(frozen=True)

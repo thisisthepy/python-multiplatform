@@ -39,6 +39,8 @@ TABLE = [
     ("aot/import", "def f() -> None:\n    import math\n", (ERR, None, "math", 2)),
     ("aot/import", "from . import x\n", (ERR, None, ".", 1)),
     ("aot/import", "from math import *\n", (ERR, None, "math", 1)),
+    ("aot/import", "from collections.abc import Mapping\n", (ERR, None, "collections.abc", 1)),
+    ("aot/import", "from collections.abc import KeysView as K\n", (ERR, None, "collections.abc", 1)),
     # aot/identity
     ("aot/identity", "def f(x: int) -> int:\n    return id(x)\n", (ERR, None, "id", 2)),
     ("aot/identity", "def f(x: int) -> int:\n    return hash(x)\n", (ERR, None, "hash", 2)),
@@ -53,7 +55,8 @@ TABLE = [
     # aot/generator
     ("aot/generator", "def f(n: int):\n    yield n\n", (ERR, None, "yield", 2)),
     ("aot/generator", "def f(n: int):\n    yield from n\n", (ERR, None, "yield from", 2)),
-    ("aot/generator", "def f(n: int) -> int:\n    return sum(i for i in range(n))\n", (ERR, None, "generator expression", 2)),
+    # (tier S2c: `return sum(i for i in range(n))` compiles, leader 2026-11-28; a generator held in a name does not)
+    ("aot/generator", "def f(n: int) -> int:\n    g = (i for i in range(n))\n    return 0\n", (ERR, None, "generator expression", 2)),
     # aot/async
     ("aot/async", "async def f() -> None:\n    pass\n", (ERR, None, "async def", 1)),
     ("aot/async", "async def f(x: int) -> int:\n    return await x\n", (ERR, None, "await", 2)),
@@ -100,28 +103,21 @@ TABLE = [
     # aot/builtin-unavailable
     ("aot/builtin-unavailable", "def f() -> None:\n    open('x')\n", (ERR, None, "open", 2)),
     ("aot/builtin-unavailable", "def f(x: int) -> None:\n    map(None, x)\n", (ERR, None, "map", 2)),
-    # aot/builtin (pending K)
-    ("aot/builtin", "def f() -> None:\n    print(1)\n", (PEND, "K", "print", 2)),
-    ("aot/builtin", "def f(x: float) -> int:\n    return int(x)\n", (PEND, "K", "int", 2)),
-    ("aot/builtin", "def f(a: int, b: int) -> int:\n    return max(a, b)\n", (PEND, "K", "max", 2)),
-    ("aot/builtin", "import sys\n\ndef f() -> None:\n    sys.exit(1)\n", (PEND, "K", "sys.exit", 4)),
-    ("aot/builtin", "import sys\n\ndef f() -> str:\n    return sys.argv[1]\n", (PEND, "K", "sys.argv", 4)),
-    ("aot/builtin", "def f(x: int) -> str:\n    return f'{x}'\n", (PEND, "K", "f-string", 2)),
-    ("aot/builtin", "def f(x: int) -> int:\n    return 1 if x else 2\n", (PEND, "K", "conditional expression", 2)),
-    ("aot/builtin", "def f(t: tuple[int, int]) -> int:\n    a, b = t\n    return a + b\n", (PEND, "K", "tuple unpacking", 2)),
-    ("aot/builtin", "def f() -> list[int]:\n    return [1, 2]\n", (PEND, "K", "list display", 2)),
+    # aot/builtin (pending K: non-constant module-level statement)
     ("aot/builtin", "x = 1\nfor i in range(3):\n    pass\n", (PEND, "K", "For", 2)),
-    # aot/entry (pending K)
-    ("aot/entry", "def main() -> None:\n    pass\n\nif __name__ == \"__main__\":\n    main()\n", (PEND, "K", "__main__", 4)),
+    # aot/class-shape (kept above)
     # aot/str, aot/container, aot/exception, aot/builtin (pending S)
-    ("aot/str", "def f() -> str:\n    return 'a b'.upper()\n", (PEND, "S", "upper", 2)),
-    ("aot/str", "def f(s: str) -> int:\n    return s.find('a')\n", (PEND, "S", "find", 2)),
-    ("aot/container", "def f() -> int:\n    d = {1: 2}\n    return 0\n", (PEND, "S", "dict display", 2)),
+    ("aot/str", "def f() -> str:\n    return 'a b'.title()\n", (PEND, "S", "title", 2)),
+    ("aot/str", "def f(s: str) -> int:\n    return s.count('a')\n", (PEND, "S", "count", 2)),
+    ("aot/str", "def f(s: str) -> str:\n    return s.casefold()\n", (PEND, "S", "casefold", 2)),
+    ("aot/container", "def f(e: dict[str, int]) -> int:\n    d = {**e}\n    return 0\n", (PEND, "S", "dict display", 2)),
     ("aot/container", "def f(n: int) -> int:\n    return len([i for i in range(n)])\n", (PEND, "S", "list comprehension", 2)),
     ("aot/exception", "def f() -> None:\n    raise ValueError('x')\n", (PEND, "S", "raise", 2)),
     ("aot/exception", "def f() -> None:\n    try:\n        pass\n    finally:\n        pass\n", (PEND, "S", "try", 2)),
     ("aot/exception", "def f(x: int) -> None:\n    assert x\n", (PEND, "S", "assert", 2)),
-    ("aot/builtin", "def f(a: list[int]) -> list[int]:\n    return sorted(a)\n", (PEND, "S", "sorted", 2)),
+    # (tier S2c: `return sorted(a)` compiles; sorted() anywhere else is pending)
+    ("aot/builtin", "def f(a: list[int]) -> int:\n    return len(sorted(a))\n", (PEND, "S", "sorted", 2)),
+    ("aot/builtin", "def f(x: int) -> str:\n    return format(x)\n", (PEND, "S", "format", 2)),
     # aot/threading (pending T)
     ("aot/threading", "import threading\n", (PEND, "T", "threading", 1)),
 ]
@@ -140,7 +136,7 @@ def test_every_rule_of_the_table_has_a_row():
         "aot/dynamic-code", "aot/import", "aot/identity", "aot/introspection", "aot/generator", "aot/async",
         "aot/closure", "aot/global", "aot/decorator", "aot/with", "aot/match", "aot/class-shape",
         "aot/inheritance", "aot/signal", "aot/set-order", "aot/star-args", "aot/numpy",
-        "aot/builtin-unavailable", "aot/builtin", "aot/entry", "aot/str", "aot/container", "aot/exception",
+        "aot/builtin-unavailable", "aot/builtin", "aot/str", "aot/container", "aot/exception",
         "aot/threading",
     }
 
@@ -158,16 +154,147 @@ def test_things_inside_the_subset_are_not_reported(tmp_path):
         def f(n: int, a: list[float]) -> float:
             b: list[float] = [0.0] * n
             c: list[int] = list(range(n))
+            d: list[float] = [1.0, 2.0]
             t: float = math.sqrt(float(len(a)))
-            return t + b[0] + c[0] + time.perf_counter() if False else t
+            print(f"{t:.3f}")
+            return t + b[0] + c[0] + d[0] + time.perf_counter() if False else t
 
         def g(x: int) -> bool:
-            return isinstance(x, int) and type(x) is int
+            return isinstance(x, int) and type(x) is int and bool(abs(min(x, max(x, 0))))
+
+        if __name__ == "__main__":
+            n: int = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+            print(n)
     """)
     report = aotcheck.check(path, front_end=False)
-    names = {(f.rule, f.name) for f in report.findings}
-    # the only finding is the conditional expression in `f`; nothing else is reported
-    assert names == {("aot/builtin", "conditional expression")}, report.lines()
+    assert report.findings == [], report.lines()
+
+
+def test_sets_that_do_not_depend_on_their_order_are_not_reported(tmp_path):
+    """Tier S2b: a set display, `set()` and `set(s)` compile (the front end checks the types); a loop over a set is
+    aot/set-order (the rows above)."""
+    path = write(tmp_path, """
+        def f(s: set[int]) -> int:
+            a: set[int] = set()
+            b = set(s)
+            c = {1, 2} | a
+            return len(b & c)
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
+def test_a_comprehension_bound_to_a_name_or_returned_is_not_reported(tmp_path):
+    """Tier S2c: such a comprehension is the loop it means (typedpython/comprehensions.py); as an operand it is still
+    pending (the table row above)."""
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> list[int]:
+            ys = [x + 1 for x in xs if x]
+            s: set[int] = {x for x in ys}
+            d = {x: x * 2 for x in range(3)}
+            return [y for y in ys]
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
+def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
+    """Tier S2c: `for i, x in enumerate(...)`, `for a, b in zip(...)` and `for x in reversed(...)`, in a `for` statement or a placed comprehension,
+    are the loops they mean (typedpython/loops.py); anywhere else they are still pending."""
+    path = write(tmp_path, """
+        def f(xs: list[int], ws: list[str]) -> list[int]:
+            for i, x in enumerate(xs, 1):
+                print(i, x)
+            for w, x in zip(ws, xs):
+                print(w, x)
+            for w in reversed(ws):
+                print(w)
+            for i, x in enumerate(reversed(xs)):
+                print(i, x)
+            t = sum(xs)
+            v = sorted(xs, reverse=True)
+            v.sort()
+            u = any(range(t))
+            print(u)
+            return [i * x for i, x in enumerate(xs)]
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> int:
+            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs))) + int(all(xs)) + len(sorted(xs))
+    """)
+    names = {f.name for f in aotcheck.check(path, front_end=False).findings}
+    assert {"zip", "enumerate", "reversed", "sum", "all", "sorted"} <= names, names
+
+
+def test_bytes_are_not_reported(tmp_path):
+    """Tier S2c: bytes literals, `bytes()`, `bytes(n)`, `bytes(xs)`, `s.encode()` and `b.decode()` compile; a string
+    method that is not compiled is still pending."""
+    path = write(tmp_path, """
+        def f(s: str, xs: list[int]) -> str:
+            b = s.encode()
+            c = b"ab" + bytes(2) + bytes(xs) + bytes()
+            return c.decode("utf-8") + "x".encode().decode()
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
+def test_a_key_function_is_not_reported(tmp_path):
+    """Tier S2c: the key= of sorted() / min() / max() bound to a name or returned and of `xs.sort(...)`, a function's
+    name or a lambda, compiles (the front end checks the rest); a lambda anywhere else is still reported."""
+    path = write(tmp_path, """
+        def g(v: int) -> int:
+            return -v
+
+        def f(xs: list[int], ws: list[str]) -> int:
+            a = sorted(xs, key=g)
+            b = sorted(ws, key=lambda w: w[1:], reverse=True)
+            xs.sort(key=lambda v: v % 3)
+            m = min(xs, key=g)
+            n = max(ws, key=len, default="")
+            h = lambda v: v
+            return len(a) + len(b) + m + len(n) + h(1)
+    """)
+    report = aotcheck.check(path, front_end=False)
+    got = sorted((f.line, f.rule, f.name) for f in report.findings)
+    assert [(r, n) for _, r, n in got] == [("aot/closure", "lambda")], report.lines()
+    assert got[0][0] == 10, report.lines()
+
+
+def test_a_generator_argument_of_a_placed_reducer_is_not_reported(tmp_path):
+    """Tier S2c (leader 2026-11-28): a generator expression that is the argument of sum() / any() / all() / min() /
+    max() / sorted() bound to a name or returned is the loop it means; a generator anywhere else is still reported."""
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> int:
+            a = sum(x * 2 for x in xs if x)
+            b = any(x > 1 for x in xs)
+            c = sorted((x for x in xs), key=lambda v: -v)
+            d = max((x for x in xs), default=0)
+            g = (x for x in xs)
+            return a + int(b) + len(c) + d + len(list(g))
+    """)
+    report = aotcheck.check(path, front_end=False)
+    got = sorted((f.line, f.rule, f.name) for f in report.findings)
+    assert ("aot/generator", "generator expression") in [(r, n) for _, r, n in got], report.lines()
+    assert all(line == 6 for line, r, _ in got if r == "aot/generator"), report.lines()
+
+
+def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):
+    """Tier S2b: `from collections.abc import KeysView, ValuesView, ItemsView` names the types of a view passed to or
+    returned from a function (the front end checks how the view is used)."""
+    path = write(tmp_path, """
+        from collections.abc import ItemsView, KeysView, ValuesView
+
+        def f(k: KeysView[str], v: ValuesView[int], i: ItemsView[str, int]) -> int:
+            return len(k) + len(v) + len(i)
+
+        def g(d: dict[str, int]) -> KeysView[str]:
+            return d.keys()
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
 
 
 # --- several findings in one function ---------------------------------------------------------------
@@ -177,14 +304,14 @@ def test_every_finding_of_a_function_is_reported(tmp_path):
         def f(s: str) -> int:
             a = eval(s)
             b = id(a)
-            print(b)
+            sorted(b)
             return hash(a)
     """), front_end=False)
     got = sorted((f.line, f.rule, f.name, f.function) for f in report.findings)
     assert got == [
         (2, "aot/dynamic-code", "eval", "f"),
         (3, "aot/identity", "id", "f"),
-        (4, "aot/builtin", "print", "f"),
+        (4, "aot/builtin", "sorted", "f"),
         (5, "aot/identity", "hash", "f"),
     ]
 
@@ -195,34 +322,44 @@ def test_a_method_finding_names_its_class(tmp_path):
             def m(self) -> int:
                 return id(self)
     """), front_end=False)
-    assert [(f.rule, f.function, f.line) for f in report.findings] == [("aot/identity", "C", 3)]
+    assert [(f.rule, f.function, f.line) for f in report.findings if f.rule == "aot/identity"] == [
+        ("aot/identity", "C", 3)
+    ]
 
 
 # --- the benchmark kernels --------------------------------------------------------------------------
 
-KERNELS = {
-    "nbody": ["advance", "energy", "offset_momentum"],
-    "spectral_norm": ["eval_a", "mul_av", "mul_atv"],
-    "fannkuch": ["fannkuch"],
+TIER_K_BENCHMARKS = {
+    "nbody": ["advance", "energy", "offset_momentum", "main", "__main__"],
+    "spectral_norm": ["eval_a", "mul_av", "mul_atv", "mul_atav", "main", "__main__"],
+    "fannkuch": ["fannkuch", "main", "__main__"],
 }
 
 
-@pytest.mark.parametrize("benchmark", sorted(KERNELS))
-def test_kernels_are_ready_and_free_of_findings(benchmark):
+@pytest.mark.parametrize("benchmark", sorted(TIER_K_BENCHMARKS))
+def test_tier_k_benchmarks_are_ready_and_free_of_findings(benchmark):
     report = aotcheck.check(BENCH / f"{benchmark}.py")
+    assert not report.blocking, report.lines()
+    assert report.findings == [], report.lines()
     status = {s.name: s for s in report.functions}
-    for name in KERNELS[benchmark]:
+    for name in TIER_K_BENCHMARKS[benchmark]:
         assert status[name].ready, (name, status[name].reasons)
-        assert [f for f in report.findings if f.function == name] == []
-    # a checker that reports nothing would pass the lines above: `main` must be seen as not done
-    assert not status["main"].ready
-    assert [f for f in report.findings if f.function == "main"]
+    assert all(s.ready for s in report.functions), [(s.name, s.reasons) for s in report.functions if not s.ready]
+
+
+def test_tier_o_and_s_benchmarks_are_ready_and_free_of_findings():
+    # (wordfreq: a dict[str, int] and loops over its items, tier S2b)
+    for name in ("binary_trees", "wordfreq"):
+        report = aotcheck.check(BENCH / f"{name}.py")
+        assert not report.blocking, report.lines()
+        assert not report.findings, report.lines()
+        assert all(s.ready for s in report.functions), [(s.name, s.reasons) for s in report.functions if not s.ready]
 
 
 # --- a program of several modules -------------------------------------------------------------------
 
 def test_findings_carry_the_file_they_are_in(tmp_path):
-    write(tmp_path, "def twice(n: int) -> int:\n    print(n)\n    return n * 2\n", "helper.py")
+    write(tmp_path, "def twice(n: int) -> int:\n    sorted([n])\n    return n * 2\n", "helper.py")
     write(tmp_path, "X = eval('1')\n", "other.py")
     entry = write(tmp_path, """
         import helper
@@ -235,7 +372,7 @@ def test_findings_carry_the_file_they_are_in(tmp_path):
     report = aotcheck.check(entry, front_end=False)
     got = sorted((f.path, f.line, f.rule, f.name) for f in report.findings)
     assert got == [
-        ("helper.py", 2, "aot/builtin", "print"),
+        ("helper.py", 2, "aot/builtin", "sorted"),
         ("mod.py", 2, "aot/import", "json"),
         ("other.py", 1, "aot/builtin", "Assign"),        # a module-level call is not a constant assignment
         ("other.py", 1, "aot/dynamic-code", "eval"),
@@ -326,7 +463,7 @@ def test_cli_clean_kernel_only_module(tmp_path, capsys):
 
 
 def test_cli_json_matches_the_report(tmp_path, capsys):
-    path = write(tmp_path, "def f(s: str) -> int:\n    print(s)\n    return eval(s)\n")
+    path = write(tmp_path, "def f(s: str) -> int:\n    sorted(s)\n    return eval(s)\n")
     assert main(["aot-check", str(path), "--json"]) == 1
     doc = json.loads(capsys.readouterr().out)
     report = aotcheck.check(path)

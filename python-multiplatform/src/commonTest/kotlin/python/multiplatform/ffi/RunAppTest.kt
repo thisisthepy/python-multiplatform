@@ -52,13 +52,55 @@ class RunAppTest {
         )
     }.let { PythonTestFixture.eval("__pmp_runapp_tmp_path__").toString() }
 
+    /**
+     * [Python3.runApp] with the baseline signature `(argc, argv)` (issue #524 item 7): `argv[0]` is the
+     * program name, as in C `main` and `Py_BytesMain`, and [args] are what follows it.
+     */
+    private fun runApp(vararg args: String): Int = Python3.runApp(args.size + 1, arrayOf("python", *args))
+
+    // ------------------------------------------------------------------------------------
+    // argc and argv (the baseline signature, #524 item 7)
+    // ------------------------------------------------------------------------------------
+
+    @Test
+    fun theFirstElementOfArgvIsTheProgramNameAndIsNotParsed() = PythonTestFixture.withInterpreter {
+        // A program name that looks like an option must not be read as one.
+        assertEquals(5, Python3.runApp(3, arrayOf("-m", "-c", "import sys; sys.exit(5)")))
+    }
+
+    @Test
+    fun argcLimitsWhatIsReadFromArgv() = PythonTestFixture.withInterpreter {
+        val status = Python3.runApp(
+            3,
+            arrayOf("python", "-c", "import sys, builtins; builtins.__pmp_runapp_argc__ = list(sys.argv)", "beyond-argc"),
+        )
+        assertEquals(0, status)
+        try {
+            assertEquals("['-c']", PythonTestFixture.eval("__import__('builtins').__pmp_runapp_argc__").toString())
+        } finally {
+            Python3.exec("import builtins\ndel builtins.__pmp_runapp_argc__")
+        }
+    }
+
+    @Test
+    fun anArgcOutsideArgvIsRefused() = PythonTestFixture.withInterpreter {
+        assertFailsWith<IllegalArgumentException> { Python3.runApp(4, arrayOf("python", "-c", "pass")) }
+        assertFailsWith<IllegalArgumentException> { Python3.runApp(-1, arrayOf("python", "-c", "pass")) }
+    }
+
+    @Test
+    fun aProgramNameAloneIsNothingToRun() = PythonTestFixture.withInterpreter {
+        assertFailsWith<UnsupportedOperationException> { Python3.runApp(1, arrayOf("python")) }
+        assertFailsWith<UnsupportedOperationException> { Python3.runApp(0, emptyArray()) }
+    }
+
     // ------------------------------------------------------------------------------------
     // -c
     // ------------------------------------------------------------------------------------
 
     @Test
     fun dashCReturnsSysExitStatusAndTheInterpreterSurvives() = PythonTestFixture.withInterpreter {
-        val status = Python3.runApp(listOf("-c", "import sys; sys.exit(3)"))
+        val status = runApp("-c", "import sys; sys.exit(3)")
 
         assertEquals(3, status)
         // The property Py_RunMain cannot offer: proof the interpreter is still usable.
@@ -70,7 +112,7 @@ class RunAppTest {
 
     @Test
     fun dashCWithNoSysExitReturnsZeroAndRunsInSharedMain() = PythonTestFixture.withInterpreter {
-        val status = Python3.runApp(listOf("-c", "pmp_runapp_dashc_wrote_main = 'yes'"))
+        val status = runApp("-c", "pmp_runapp_dashc_wrote_main = 'yes'")
 
         assertEquals(0, status)
         assertEquals(
@@ -82,19 +124,19 @@ class RunAppTest {
 
     @Test
     fun dashCBareSysExitIsStatusZero() = PythonTestFixture.withInterpreter {
-        assertEquals(0, Python3.runApp(listOf("-c", "import sys\nsys.exit()")))
+        assertEquals(0, runApp("-c", "import sys\nsys.exit()"))
     }
 
     @Test
     fun dashCNonIntegerSysExitReportsStatusOneAsCPythonDoes() = PythonTestFixture.withInterpreter {
-        assertEquals(1, Python3.runApp(listOf("-c", "import sys\nsys.exit('pmp-runapp-message')")))
+        assertEquals(1, runApp("-c", "import sys\nsys.exit('pmp-runapp-message')"))
         assertTrue(Python3.isInitialized)
     }
 
     @Test
     fun dashCPropagatesAnOrdinaryExceptionAsPyException() = PythonTestFixture.withInterpreter {
         val failure = assertFailsWith<PyException> {
-            Python3.runApp(listOf("-c", "raise ValueError('pmp-runapp-dashc-boom')"))
+            runApp("-c", "raise ValueError('pmp-runapp-dashc-boom')")
         }
         assertTrue(failure.message?.contains("pmp-runapp-dashc-boom") == true)
         assertTrue(Python3.isInitialized)
@@ -106,7 +148,7 @@ class RunAppTest {
         Python3.exec("import sys\npmp_runapp_argv_before = list(sys.argv) if hasattr(sys, 'argv') else None")
         val before = PythonTestFixture.eval("repr(pmp_runapp_argv_before)").toString()
 
-        Python3.runApp(listOf("-c", "import sys, builtins; builtins.__pmp_runapp_dashc_argv__ = list(sys.argv)", "a", "b"))
+        runApp("-c", "import sys, builtins; builtins.__pmp_runapp_dashc_argv__ = list(sys.argv)", "a", "b")
 
         assertEquals(
             "['-c', 'a', 'b']",
@@ -125,7 +167,7 @@ class RunAppTest {
         Python3.exec("import sys\npmp_runapp_argv_before2 = list(sys.argv) if hasattr(sys, 'argv') else None")
         val before = PythonTestFixture.eval("repr(pmp_runapp_argv_before2)").toString()
 
-        assertFailsWith<PyException> { Python3.runApp(listOf("-c", "raise RuntimeError('pmp-runapp-argv-raise')", "x")) }
+        assertFailsWith<PyException> { runApp("-c", "raise RuntimeError('pmp-runapp-argv-raise')", "x") }
 
         assertEquals(
             before,
@@ -135,7 +177,7 @@ class RunAppTest {
 
     @Test
     fun dashCWithNoCommandRefusesRatherThanMisreadingTheNextArgument() = PythonTestFixture.withInterpreter {
-        val failure = assertFailsWith<IllegalArgumentException> { Python3.runApp(listOf("-c")) }
+        val failure = assertFailsWith<IllegalArgumentException> { runApp("-c") }
         assertTrue(failure.message?.contains("-c") == true, "got: ${failure.message}")
     }
 
@@ -154,7 +196,7 @@ class RunAppTest {
             """.trimIndent()
         )
 
-        val status = Python3.runApp(listOf("-m", "pmp_runapp_module_ok", "x", "y"))
+        val status = runApp("-m", "pmp_runapp_module_ok", "x", "y")
 
         assertEquals(0, status)
         assertEquals(
@@ -172,13 +214,13 @@ class RunAppTest {
     fun dashMSysExitIsReturnedNotThrown() = PythonTestFixture.withInterpreter {
         registerModule("pmp_runapp_module_exit", "import sys\nsys.exit(7)\n")
 
-        assertEquals(7, Python3.runApp(listOf("-m", "pmp_runapp_module_exit")))
+        assertEquals(7, runApp("-m", "pmp_runapp_module_exit"))
         assertTrue(Python3.isInitialized)
     }
 
     @Test
     fun dashMWithNoModuleRefuses() = PythonTestFixture.withInterpreter {
-        val failure = assertFailsWith<IllegalArgumentException> { Python3.runApp(listOf("-m")) }
+        val failure = assertFailsWith<IllegalArgumentException> { runApp("-m") }
         assertTrue(failure.message?.contains("-m") == true, "got: ${failure.message}")
     }
 
@@ -195,11 +237,13 @@ class RunAppTest {
                 "builtins.__pmp_runapp_script_saw_shared_global__ = pmp_runapp_script_sees_this\n"
         )
 
-        val status = Python3.runApp(listOf(path, "arg1", "arg2"))
+        val status = runApp(path, "arg1", "arg2")
 
         assertEquals(0, status)
         assertEquals(
-            "['$path', 'arg1', 'arg2']",
+            // repr() of the expected list, not the path pasted between quotes: a Windows path's
+            // backslashes are doubled by repr (mingwX64, batch run 44980924060).
+            PythonTestFixture.eval("repr([${path.asPythonStringLiteral()}, 'arg1', 'arg2'])").toString(),
             PythonTestFixture.eval("repr(__import__('builtins').__pmp_runapp_script_argv__)").toString(),
             "sys.argv[0] must be the script path exactly as given, matching CPython"
         )
@@ -216,7 +260,7 @@ class RunAppTest {
     fun scriptPathSysExitIsReturnedNotThrown() = PythonTestFixture.withInterpreter {
         val path = writeTempScript("import sys\nsys.exit(9)\n")
 
-        assertEquals(9, Python3.runApp(listOf(path)))
+        assertEquals(9, runApp(path))
         assertTrue(Python3.isInitialized)
         Python3.exec("import os; os.remove(${path.asPythonStringLiteral()})")
     }
@@ -229,11 +273,11 @@ class RunAppTest {
     fun dashDashForcesTheNextTokenToBeTreatedAsAScriptPath() = PythonTestFixture.withInterpreter {
         val path = writeTempScript("import sys, builtins\nbuiltins.__pmp_runapp_dashdash_argv__ = list(sys.argv)\n")
 
-        val status = Python3.runApp(listOf("--", path, "z"))
+        val status = runApp("--", path, "z")
 
         assertEquals(0, status)
         assertEquals(
-            "['$path', 'z']",
+            PythonTestFixture.eval("repr([${path.asPythonStringLiteral()}, 'z'])").toString(),
             PythonTestFixture.eval("repr(__import__('builtins').__pmp_runapp_dashdash_argv__)").toString()
         )
         Python3.exec("import os; os.remove(${path.asPythonStringLiteral()})")
@@ -241,7 +285,7 @@ class RunAppTest {
 
     @Test
     fun dashDashWithNothingAfterItRefuses() = PythonTestFixture.withInterpreter {
-        assertFailsWith<UnsupportedOperationException> { Python3.runApp(listOf("--")) }
+        assertFailsWith<UnsupportedOperationException> { runApp("--") }
     }
 
     // ------------------------------------------------------------------------------------
@@ -250,12 +294,12 @@ class RunAppTest {
 
     @Test
     fun emptyArgsRefusesRatherThanReadingStdin() = PythonTestFixture.withInterpreter {
-        assertFailsWith<UnsupportedOperationException> { Python3.runApp(emptyList()) }
+        assertFailsWith<UnsupportedOperationException> { runApp() }
     }
 
     @Test
     fun dashRefusesRatherThanReadingStdin() = PythonTestFixture.withInterpreter {
-        val failure = assertFailsWith<UnsupportedOperationException> { Python3.runApp(listOf("-")) }
+        val failure = assertFailsWith<UnsupportedOperationException> { runApp("-") }
         assertTrue(failure.message?.contains("stdin") == true, "got: ${failure.message}")
     }
 
@@ -270,7 +314,7 @@ class RunAppTest {
         val preInitOnlyOptions = listOf("-E", "-I", "-S", "-s", "-B", "-O", "-OO", "-X", "-W", "-u", "-P")
         for (option in preInitOnlyOptions) {
             val failure = assertFailsWith<UnsupportedOperationException>("expected '$option' to be refused") {
-                Python3.runApp(listOf(option, "-c", "pass"))
+                runApp(option, "-c", "pass")
             }
             assertTrue(
                 failure.message?.contains(option) == true,
@@ -281,7 +325,7 @@ class RunAppTest {
 
     @Test
     fun anUnrecognizedOptionIsRefusedByNameRatherThanMisreadAsAScript() = PythonTestFixture.withInterpreter {
-        val failure = assertFailsWith<UnsupportedOperationException> { Python3.runApp(listOf("-Q", "pass")) }
+        val failure = assertFailsWith<UnsupportedOperationException> { runApp("-Q", "pass") }
         assertTrue(failure.message?.contains("-Q") == true, "got: ${failure.message}")
     }
 

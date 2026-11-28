@@ -20,3 +20,10 @@ external val wasmExports: JsAny
  * -- the JS-side routes the measurement tests price the direct ones against.
  */
 external val mod: JsAny
+
+/**
+ * SPEC T-8: the message `cpython.mjs` throws before the Emscripten factory runs, or `null` when the
+ * start-up may go ahead. [isolated] is what the page's `globalThis.crossOriginIsolated` holds
+ * (`undefined`, a boolean, or anything else a host puts there).
+ */
+external fun crossOriginIsolationError(isNode: Boolean, sharedMemory: Boolean, isolated: JsAny?): JsString?

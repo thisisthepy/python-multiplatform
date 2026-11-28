@@ -32,6 +32,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 /* Issue #464: an AOT build must compute the floats CPython computes, even when a caller compiles the
  * generated C (--emit-c, or a packaging step outside aot/cc.py) without our compiler flags. Contraction
@@ -96,16 +103,19 @@
 typedef int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((void)_InterlockedIncrement64((volatile __int64 *)&(l)->rc))
 #define TPA_RC_DEC_IS_ZERO(l) (_InterlockedDecrement64((volatile __int64 *)&(l)->rc) == 0)
+#define TPA_RC_LOAD(l) ((int64_t)_InterlockedOr64((volatile __int64 *)&(l)->rc, 0))
 #else
 #include <stdatomic.h>
 typedef _Atomic int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((void)atomic_fetch_add_explicit(&(l)->rc, 1, memory_order_relaxed))
 #define TPA_RC_DEC_IS_ZERO(l) (atomic_fetch_sub_explicit(&(l)->rc, 1, memory_order_acq_rel) == 1)
+#define TPA_RC_LOAD(l) (atomic_load_explicit(&(l)->rc, memory_order_relaxed))
 #endif
 #else
 typedef int64_t tpa_rc_t;
 #define TPA_RC_INC(l) ((l)->rc += 1)
 #define TPA_RC_DEC_IS_ZERO(l) (--(l)->rc == 0)
+#define TPA_RC_LOAD(l) ((l)->rc)
 #endif
 
 #if defined(TPA_LIBRARY)
@@ -124,7 +134,11 @@ typedef int64_t tpa_rc_t;
 #define TPA_OverflowError 3
 #define TPA_IndexError 4
 #define TPA_MemoryError 5
-#define TPA_TypeError 6          /* library build: a NULL list handle (an ABI-level check, no counterpart in the source language) */
+#define TPA_TypeError 6          /* library build: a NULL list handle; tier S1: ord() of a string that is not one character (an ABI-level check, no counterpart in the source language) */
+#define TPA_UnicodeEncodeError 7 /* tier S1: a lone surrogate written to standard output (tp_aot_str.h) */
+#define TPA_KeyError 8           /* tier S2b: a missing dict key (the message is the key's repr), an empty popitem */
+#define TPA_RuntimeError 9       /* tier S2b: a dict changed size during iteration (tp_aot_dict.h) */
+#define TPA_UnicodeDecodeError 10 /* tier S2c: bytes.decode() of bytes that are not UTF-8 (tp_aot_str.h) */
 
 typedef struct {
     int kind;
@@ -142,6 +156,10 @@ static inline const char *tpa_exc_name(int kind)
     case TPA_IndexError: return "IndexError";
     case TPA_MemoryError: return "MemoryError";
     case TPA_TypeError: return "TypeError";
+    case TPA_UnicodeEncodeError: return "UnicodeEncodeError";
+    case TPA_KeyError: return "KeyError";
+    case TPA_RuntimeError: return "RuntimeError";
+    case TPA_UnicodeDecodeError: return "UnicodeDecodeError";
     }
     return "SystemError";
 }
@@ -422,142 +440,492 @@ static inline int tpa_cmp_f64_i64(double a, int64_t b, int op)
 }
 
 /* ------------------------------------------------------------------------------------------
- * repr(float): the shortest decimal string that parses back to the same double, laid out as
- * CPython's float_repr (format_float_short with mode 'r'): exponent notation when the decimal
- * exponent of the first digit is below -4 or at least 16, else positional with `.0` when there is no
- * fractional part. nan, inf and -inf as CPython writes them.
+ * Exact binary64 decimal formatting (issue #450): no dependence on the C library's snprintf or
+ * strtod rounding. Both `tpa_repr_f64` (shortest round-trip, Burger-Dybvig / Dragon4 with
+ * CPython's round-half-to-even tie-breaking) and `tpa_format_f64_fixed` (exact fixed-point
+ * rounding `format(v, '.<prec>f')`) operate directly on IEEE-754 bits using fixed-capacity
+ * 32-bit little-endian unsigned big integers (pure C99, uint64_t intermediates, no 128-bit integer).
  *
- * The digits: the smallest precision p in 1..17 for which the correctly rounded p-digit decimal
- * (`%.*e`) parses back to x. Where x is a power of two the interval that rounds to x is asymmetric
- * (half as wide below as above), so the nearest p-digit decimal can fall outside it while the next one
- * up is inside; CPython's David Gay conversion finds that one, so the two neighbours of the nearest
- * decimal are tried too. (A scripted port of exactly this procedure matched repr() on 600000 random
- * doubles and on every power-of-two neighbourhood; the corpus test compares this C with CPython.)
+ * Limb bound: in `tpa_repr_f64`, |k + 1| <= 324, so 5^|k+1| <= 5^324 (< 753 bits) and the
+ * scaled values stay within 780 bits (25 limbs). In `tpa_format_f64_fixed`, exact integer values
+ * m * 2^e2 fit in 1024 bits (32 limbs), and for e2 < 0 with prec <= 20, m * 5^prec fits in 100
+ * bits (4 limbs). 36 limbs (1152 bits) give comfortable headroom for both.
  * ------------------------------------------------------------------------------------------ */
+#define TPA__F64_MAX_LIMBS 36
 
-/* p digits of x > 0 into digs (no point), the decimal exponent of the first digit in *e */
-static inline void tpa__digits(double x, int p, char *digs, int *e)
+typedef struct {
+    int n;
+    uint32_t d[TPA__F64_MAX_LIMBS];
+} tpa__f64_bu;
+
+static inline void tpa__f64_bu_trim(tpa__f64_bu *a)
 {
-    char buf[48];
-    const char *s = buf;
+    while (a->n > 0 && a->d[a->n - 1] == 0) {
+        a->n--;
+    }
+}
+
+static inline void tpa__f64_bu_from_u64(tpa__f64_bu *a, uint64_t v)
+{
+    if (v == 0) {
+        a->n = 0;
+        return;
+    }
+    a->d[0] = (uint32_t)v;
+    if ((v >> 32) != 0) {
+        a->d[1] = (uint32_t)(v >> 32);
+        a->n = 2;
+    }
+    else {
+        a->n = 1;
+    }
+}
+
+static inline int tpa__f64_u64_bitlen(uint64_t v)
+{
     int n = 0;
-    snprintf(buf, sizeof buf, "%.*e", p - 1, x);
-    digs[n++] = *s++;
-    if (*s == '.') {
-        s++;
-        while (*s >= '0' && *s <= '9') {
-            digs[n++] = *s++;
-        }
+    while (v != 0) {
+        n++;
+        v >>= 1;
     }
-    *e = atoi(s + 1);                /* s is at the 'e'; atoi reads the sign and the digits */
-    digs[n] = '\0';
+    return n;
 }
 
-static inline int tpa__roundtrips(const char *digs, int p, int e, double x)
+static inline int tpa__f64_bu_bitlen(const tpa__f64_bu *a)
 {
-    char buf[64];
-    int n = 0, i;
-    buf[n++] = digs[0];
-    if (p > 1) {
-        buf[n++] = '.';
-        for (i = 1; i < p; i++) {
-            buf[n++] = digs[i];
-        }
+    int bl;
+    uint32_t w;
+    if (a->n == 0) {
+        return 0;
     }
-    snprintf(buf + n, sizeof buf - (size_t)n, "e%d", e);
-    return strtod(buf, NULL) == x;
+    bl = (a->n - 1) * 32;
+    w = a->d[a->n - 1];
+    while (w != 0) {
+        bl++;
+        w >>= 1;
+    }
+    return bl;
 }
 
-/* the p-digit decimal one unit in the last place above (d > 0) or below (d < 0) digs; 0 if there is none */
-static inline int tpa__bump(char *digs, int p, int *e, int d)
+static inline int tpa__f64_bu_cmp(const tpa__f64_bu *a, const tpa__f64_bu *b)
 {
     int i;
-    if (d > 0) {
-        for (i = p - 1; i >= 0; i--) {
-            if (digs[i] == '9') {
-                digs[i] = '0';
-            }
-            else {
-                digs[i]++;
-                return 1;
-            }
-        }
-        digs[0] = '1';               /* 99..9 + 1 = 100..0, one exponent up */
-        (*e)++;
-        return 1;
+    if (a->n != b->n) {
+        return a->n < b->n ? -1 : 1;
     }
-    for (i = p - 1; i >= 0; i--) {
-        if (digs[i] == '0') {
-            digs[i] = '9';
-        }
-        else {
-            digs[i]--;
-            if (i == 0 && digs[0] == '0') {
-                int j;               /* 100..0 - 1 = 99..9 with p-1 digits: p digits are 99..90, one exponent down */
-                if (p == 1) {
-                    return 0;
-                }
-                for (j = 0; j < p - 1; j++) {
-                    digs[j] = '9';
-                }
-                digs[p - 1] = '0';
-                (*e)--;
-            }
-            return 1;
+    for (i = a->n - 1; i >= 0; i--) {
+        if (a->d[i] != b->d[i]) {
+            return a->d[i] < b->d[i] ? -1 : 1;
         }
     }
     return 0;
 }
 
+static inline void tpa__f64_bu_add(tpa__f64_bu *dst, const tpa__f64_bu *a, const tpa__f64_bu *b)
+{
+    int n = a->n > b->n ? a->n : b->n;
+    uint64_t carry = 0;
+    int i;
+    for (i = 0; i < n; i++) {
+        uint64_t s = carry + (i < a->n ? (uint64_t)a->d[i] : 0) + (i < b->n ? (uint64_t)b->d[i] : 0);
+        dst->d[i] = (uint32_t)s;
+        carry = s >> 32;
+    }
+    if (carry != 0 && n < TPA__F64_MAX_LIMBS) {
+        dst->d[n++] = (uint32_t)carry;
+    }
+    dst->n = n;
+    tpa__f64_bu_trim(dst);
+}
+
+static inline void tpa__f64_bu_sub(tpa__f64_bu *a, const tpa__f64_bu *b)
+{
+    uint64_t borrow = 0;
+    int i;
+    for (i = 0; i < a->n; i++) {
+        uint64_t ai = (uint64_t)a->d[i];
+        uint64_t bi = (i < b->n ? (uint64_t)b->d[i] : 0) + borrow;
+        if (ai < bi) {
+            a->d[i] = (uint32_t)((ai + (UINT64_C(1) << 32)) - bi);
+            borrow = 1;
+        }
+        else {
+            a->d[i] = (uint32_t)(ai - bi);
+            borrow = 0;
+        }
+    }
+    tpa__f64_bu_trim(a);
+}
+
+static inline void tpa__f64_bu_mul_u32(tpa__f64_bu *a, uint32_t k)
+{
+    uint64_t carry = 0;
+    int i;
+    if (a->n == 0 || k == 0) {
+        a->n = 0;
+        return;
+    }
+    for (i = 0; i < a->n; i++) {
+        uint64_t p = (uint64_t)a->d[i] * (uint64_t)k + carry;
+        a->d[i] = (uint32_t)p;
+        carry = p >> 32;
+    }
+    if (carry != 0 && a->n < TPA__F64_MAX_LIMBS) {
+        a->d[a->n++] = (uint32_t)carry;
+    }
+}
+
+static inline void tpa__f64_bu_mul_pow5(tpa__f64_bu *a, int n)
+{
+    static const uint32_t p5[14] = {
+        1U, 5U, 25U, 125U, 625U, 3125U, 15625U, 78125U,
+        390625U, 1953125U, 9765625U, 48828125U, 244140625U, 1220703125U
+    };
+    while (n >= 13) {
+        tpa__f64_bu_mul_u32(a, p5[13]);
+        n -= 13;
+    }
+    if (n > 0) {
+        tpa__f64_bu_mul_u32(a, p5[n]);
+    }
+}
+
+static inline void tpa__f64_bu_shl(tpa__f64_bu *a, int shift)
+{
+    int ws, bs, i;
+    if (a->n == 0 || shift <= 0) {
+        return;
+    }
+    ws = shift >> 5;
+    bs = shift & 31;
+    if (bs == 0) {
+        for (i = a->n - 1; i >= 0; i--) {
+            if (i + ws < TPA__F64_MAX_LIMBS) {
+                a->d[i + ws] = a->d[i];
+            }
+        }
+        for (i = 0; i < ws && i < TPA__F64_MAX_LIMBS; i++) {
+            a->d[i] = 0;
+        }
+        a->n = (a->n + ws <= TPA__F64_MAX_LIMBS) ? a->n + ws : TPA__F64_MAX_LIMBS;
+    }
+    else {
+        uint32_t top = a->d[a->n - 1] >> (32 - bs);
+        if (top != 0 && a->n + ws < TPA__F64_MAX_LIMBS) {
+            a->d[a->n + ws] = top;
+        }
+        for (i = a->n - 1; i >= 1; i--) {
+            if (i + ws < TPA__F64_MAX_LIMBS) {
+                a->d[i + ws] = (a->d[i] << bs) | (a->d[i - 1] >> (32 - bs));
+            }
+        }
+        if (ws < TPA__F64_MAX_LIMBS) {
+            a->d[ws] = a->d[0] << bs;
+        }
+        for (i = 0; i < ws && i < TPA__F64_MAX_LIMBS; i++) {
+            a->d[i] = 0;
+        }
+        a->n += ws + (top != 0 ? 1 : 0);
+        if (a->n > TPA__F64_MAX_LIMBS) {
+            a->n = TPA__F64_MAX_LIMBS;
+        }
+    }
+    tpa__f64_bu_trim(a);
+}
+
+/* round_half_to_even(a / 2^shift) for shift > 0 */
+static inline void tpa__f64_bu_shr_round_even(tpa__f64_bu *a, int shift)
+{
+    int bl = tpa__f64_bu_bitlen(a);
+    int hw, hb, half_set, sticky = 0, ws, bs, new_n, i;
+    uint32_t mask;
+    if (bl < shift) {
+        a->n = 0;
+        return;
+    }
+    hw = (shift - 1) >> 5;
+    hb = (shift - 1) & 31;
+    mask = (UINT32_C(1) << hb) - 1U;
+    if (bl == shift) {
+        sticky = (a->d[hw] & mask) != 0;
+        for (i = 0; i < hw && !sticky; i++) {
+            if (a->d[i] != 0) {
+                sticky = 1;
+            }
+        }
+        if (sticky) {
+            a->n = 1;
+            a->d[0] = 1U;
+        }
+        else {
+            a->n = 0;
+        }
+        return;
+    }
+    half_set = ((a->d[hw] >> hb) & 1U) != 0;
+    if (half_set) {
+        sticky = (a->d[hw] & mask) != 0;
+        for (i = 0; i < hw && !sticky; i++) {
+            if (a->d[i] != 0) {
+                sticky = 1;
+            }
+        }
+    }
+    ws = shift >> 5;
+    bs = shift & 31;
+    new_n = a->n - ws;
+    if (bs == 0) {
+        for (i = 0; i < new_n; i++) {
+            a->d[i] = a->d[i + ws];
+        }
+    }
+    else {
+        for (i = 0; i < new_n - 1; i++) {
+            a->d[i] = (a->d[i + ws] >> bs) | (a->d[i + ws + 1] << (32 - bs));
+        }
+        a->d[new_n - 1] = a->d[a->n - 1] >> bs;
+    }
+    a->n = new_n;
+    tpa__f64_bu_trim(a);
+    if (half_set && (sticky || (a->n > 0 && (a->d[0] & 1U) != 0))) {
+        uint64_t carry = 1;
+        for (i = 0; i < a->n && carry != 0; i++) {
+            uint64_t s = (uint64_t)a->d[i] + carry;
+            a->d[i] = (uint32_t)s;
+            carry = s >> 32;
+        }
+        if (carry != 0 && a->n < TPA__F64_MAX_LIMBS) {
+            a->d[a->n++] = (uint32_t)carry;
+        }
+    }
+}
+
+static inline uint32_t tpa__f64_bu_divmod_u32(tpa__f64_bu *a, uint32_t k)
+{
+    uint64_t rem = 0;
+    int i;
+    for (i = a->n - 1; i >= 0; i--) {
+        uint64_t cur = (rem << 32) | (uint64_t)a->d[i];
+        a->d[i] = (uint32_t)(cur / k);
+        rem = cur % k;
+    }
+    tpa__f64_bu_trim(a);
+    return (uint32_t)rem;
+}
+
+static inline int tpa__f64_bu_to_dec(tpa__f64_bu *a, char *digs)
+{
+    uint32_t chunks[40];
+    int nchunks = 0, n = 0, i, j;
+    if (a->n == 0) {
+        digs[0] = '0';
+        return 1;
+    }
+    while (a->n > 0) {
+        chunks[nchunks++] = tpa__f64_bu_divmod_u32(a, 1000000000U);
+    }
+    {
+        uint32_t top = chunks[nchunks - 1];
+        char tmp[10];
+        int m = 0;
+        while (top > 0) {
+            tmp[m++] = (char)('0' + (top % 10U));
+            top /= 10U;
+        }
+        for (j = m - 1; j >= 0; j--) {
+            digs[n++] = tmp[j];
+        }
+    }
+    for (i = nchunks - 2; i >= 0; i--) {
+        uint32_t c = chunks[i];
+        for (j = 8; j >= 0; j--) {
+            digs[n + j] = (char)('0' + (c % 10U));
+            c /= 10U;
+        }
+        n += 9;
+    }
+    return n;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * repr(float): the shortest decimal string that parses back to the same double, laid out as
+ * CPython's float_repr (format_float_short with mode 'r'): exponent notation when the decimal
+ * exponent of the first digit is below -4 or at least 16, else positional with `.0` when there is no
+ * fractional part. nan, inf and -inf as CPython writes them.
+ * ------------------------------------------------------------------------------------------ */
+
 /* writes repr(x) into buf (at least 40 bytes) and returns its length */
 static inline int tpa_repr_f64(double x, char *buf)
 {
-    char digs[24], alt[24];
-    int p, e = 0, n = 0, i, ndig, found = 0, ae, d;
-    if (x != x) {
-        memcpy(buf, "nan", 4);
-        return 3;
-    }
-    if (x == HUGE_VAL) {
+    uint64_t bits, mant, m, c;
+    int sign, bexp, e2, even, q, m_minus, m_plus, log2_floor, e, p5, e2_rel;
+    int32_t prod;
+    tpa__f64_bu r, s, mm, mp, tmp;
+    char digs[24];
+    int p = 0, n = 0, i, ndig, ae;
+
+    memcpy(&bits, &x, sizeof bits);
+    sign = (int)(bits >> 63);
+    bexp = (int)((bits >> 52) & 0x7FFU);
+    mant = bits & ((UINT64_C(1) << 52) - 1U);
+
+    if (bexp == 0x7FF) {
+        if (mant != 0) {
+            memcpy(buf, "nan", 4);
+            return 3;
+        }
+        if (sign) {
+            memcpy(buf, "-inf", 5);
+            return 4;
+        }
         memcpy(buf, "inf", 4);
         return 3;
     }
-    if (x == -HUGE_VAL) {
-        memcpy(buf, "-inf", 5);
-        return 4;
-    }
-    if (signbit(x)) {
+    if (sign) {
         buf[n++] = '-';
-        x = -x;
     }
-    if (x == 0.0) {
+    if (bexp == 0 && mant == 0) {
         memcpy(buf + n, "0.0", 4);
         return n + 3;
     }
-    for (p = 1; p <= 17 && !found; p++) {
-        tpa__digits(x, p, digs, &e);
-        if (tpa__roundtrips(digs, p, e, x)) {
-            found = 1;
+
+    if (bexp > 0) {
+        m = (UINT64_C(1) << 52) | mant;
+        e2 = bexp - 1075;
+    }
+    else {
+        m = mant;
+        e2 = -1074;
+    }
+    even = (m & 1U) == 0;
+
+    if (mant == 0 && bexp > 1) {
+        c = m << 2;
+        m_minus = 1;
+        m_plus = 2;
+        q = e2 - 2;
+    }
+    else {
+        c = m << 1;
+        m_minus = 1;
+        m_plus = 1;
+        q = e2 - 1;
+    }
+
+    log2_floor = (tpa__f64_u64_bitlen(c) - 1) + q;
+    prod = (int32_t)log2_floor * (int32_t)315653;
+    if (prod >= 0) {
+        e = (int)((uint32_t)prod >> 20);
+    }
+    else {
+        e = -(int)(((uint32_t)(-prod) + 0xFFFFFU) >> 20);
+    }
+
+    p5 = e + 1;
+    e2_rel = q - p5;
+
+    if (p5 >= 0) {
+        tpa__f64_bu_from_u64(&r, c);
+        tpa__f64_bu_from_u64(&mm, (uint64_t)m_minus);
+        tpa__f64_bu_from_u64(&mp, (uint64_t)m_plus);
+        tpa__f64_bu_from_u64(&s, 1U);
+        tpa__f64_bu_mul_pow5(&s, p5);
+    }
+    else {
+        tpa__f64_bu_from_u64(&r, c);
+        tpa__f64_bu_mul_pow5(&r, -p5);
+        tpa__f64_bu_from_u64(&mm, (uint64_t)m_minus);
+        tpa__f64_bu_mul_pow5(&mm, -p5);
+        tpa__f64_bu_from_u64(&mp, (uint64_t)m_plus);
+        tpa__f64_bu_mul_pow5(&mp, -p5);
+        tpa__f64_bu_from_u64(&s, 1U);
+    }
+
+    if (e2_rel >= 0) {
+        tpa__f64_bu_shl(&r, e2_rel);
+        tpa__f64_bu_shl(&mm, e2_rel);
+        tpa__f64_bu_shl(&mp, e2_rel);
+    }
+    else {
+        tpa__f64_bu_shl(&s, -e2_rel);
+    }
+
+    for (;;) {
+        tmp = r;
+        tpa__f64_bu_mul_u32(&tmp, 10U);
+        if (tpa__f64_bu_cmp(&tmp, &s) >= 0) {
             break;
         }
-        for (d = 1; d >= -1; d -= 2) {
-            int e2 = e;
-            memcpy(alt, digs, (size_t)p + 1);
-            if (tpa__bump(alt, p, &e2, d) && tpa__roundtrips(alt, p, e2, x)) {
-                memcpy(digs, alt, (size_t)p + 1);
-                e = e2;
-                found = 1;
-                break;
+        r = tmp;
+        tpa__f64_bu_mul_u32(&mm, 10U);
+        tpa__f64_bu_mul_u32(&mp, 10U);
+        e--;
+    }
+
+    for (;;) {
+        int cmp;
+        tpa__f64_bu_add(&tmp, &r, &mp);
+        cmp = tpa__f64_bu_cmp(&tmp, &s);
+        if (cmp > 0 || (even && cmp == 0)) {
+            tpa__f64_bu_mul_u32(&s, 10U);
+            e++;
+        }
+        else {
+            break;
+        }
+    }
+
+    for (;;) {
+        int d = 0, cmp_low, cmp_high, low, high;
+        tpa__f64_bu_mul_u32(&r, 10U);
+        while (tpa__f64_bu_cmp(&r, &s) >= 0) {
+            tpa__f64_bu_sub(&r, &s);
+            d++;
+        }
+        tpa__f64_bu_mul_u32(&mm, 10U);
+        tpa__f64_bu_mul_u32(&mp, 10U);
+
+        cmp_low = tpa__f64_bu_cmp(&r, &mm);
+        tpa__f64_bu_add(&tmp, &r, &mp);
+        cmp_high = tpa__f64_bu_cmp(&tmp, &s);
+        if (even) {
+            low = cmp_low <= 0;
+            high = cmp_high >= 0;
+        }
+        else {
+            low = cmp_low < 0;
+            high = cmp_high > 0;
+        }
+
+        if (!low && !high) {
+            digs[p++] = (char)('0' + d);
+        }
+        else if (low && !high) {
+            digs[p++] = (char)('0' + d);
+            break;
+        }
+        else if (high && !low) {
+            digs[p++] = (char)('0' + d + 1);
+            break;
+        }
+        else {
+            int cmp2;
+            tmp = r;
+            tpa__f64_bu_shl(&tmp, 1);
+            cmp2 = tpa__f64_bu_cmp(&tmp, &s);
+            if (cmp2 < 0) {
+                digs[p++] = (char)('0' + d);
             }
-        }
-        if (found) {
+            else if (cmp2 > 0) {
+                digs[p++] = (char)('0' + d + 1);
+            }
+            else {
+                digs[p++] = (char)('0' + ((d & 1) == 0 ? d : d + 1));
+            }
             break;
         }
     }
-    if (!found) {
-        tpa__digits(x, 17, digs, &e);   /* cannot happen: 17 digits always round-trip */
-        p = 17;
-    }
+
     ndig = p;
     while (ndig > 1 && digs[ndig - 1] == '0') {
         ndig--;
@@ -836,8 +1204,20 @@ static inline int tpa_math_hypot(double x, double y, double *out)
  * parameter is borrowed: the caller keeps it alive for the call, and two parameters may be the same
  * list, as two names of one list are in the source language.
  * ------------------------------------------------------------------------------------------ */
+/* Tier S2a (design 4.3.2): a program that changes the length of a list of some kind defines TPA_GROW_<KIND> before
+ * this header, and that kind takes the growable layout: the items in their own block `d`, which append / insert /
+ * extend / pop / clear may move while the list object (every name of it) stays. The field names are the same, so an
+ * element access `l->d[i]` and a length read `l->len` are the same C text in both layouts. */
+#if defined(TPA_GROW_F64)
+typedef struct tpa_f64_list { tpa_rc_t rc; int64_t len; int64_t cap; double *d; } tpa_f64_list;
+#else
 typedef struct tpa_f64_list { tpa_rc_t rc; int64_t len; double d[]; } tpa_f64_list;
+#endif
+#if defined(TPA_GROW_I64)
+typedef struct tpa_i64_list { tpa_rc_t rc; int64_t len; int64_t cap; int64_t *d; } tpa_i64_list;
+#else
 typedef struct tpa_i64_list { tpa_rc_t rc; int64_t len; int64_t d[]; } tpa_i64_list;
+#endif
 
 /* tp_runtime.h lines 1583 to 1599, tp__local_alloc: a negative length is an empty list (CPython's
  * `[x] * -1 == []`), and a size that overflows is a MemoryError, never a wrapped small allocation. */
@@ -860,6 +1240,20 @@ static inline void *tpa__list_alloc(int64_t n, size_t header, size_t elem, int64
     return p;
 }
 
+/* Tier S2a, `t[i]` of a split tuple of `len` elements (Objects/tupleobject.c tupleitem / tuplesubscript): a negative
+ * index counts from the end; out of range raises IndexError("tuple index out of range"). */
+static inline int tpa_tuple_slot(int64_t len, int64_t i, int64_t *slot)
+{
+    if (i < 0) {
+        i += len;
+    }
+    if (i < 0 || i >= len) {
+        return tpa_raise(TPA_IndexError, "tuple index out of range");
+    }
+    *slot = i;
+    return 0;
+}
+
 /* tp_runtime.h lines 1093 to 1108, tp__array_slot: a negative index counts from the end; out of range
  * raises IndexError with CPython's text, which differs for a store (line 1107). */
 static inline int tpa_slot(int64_t len, int64_t i, int store, int64_t *slot)
@@ -879,7 +1273,30 @@ out_of_range:
     return tpa_raise(TPA_IndexError, store ? "list assignment index out of range" : "list index out of range");
 }
 
-#define TPA__DEF_LIST(NAME, CT)                                                                   \
+/* Tier S2a, the test hook of the S2 review (B1): under TP_CHECK_PROVEN (the sanitizer job) a resize never keeps or
+ * extends a block in place: it allocates a new one, copies the `keep` live bytes and frees the old one, so a stale
+ * pointer to the items is a use after free AddressSanitizer reports every time, not only when realloc moves. */
+#if defined(TP_CHECK_PROVEN)
+#define TPA__RESIZE_IN_PLACE 0
+static TPA_UNUSED void *tpa__list_realloc(void *old, size_t size, size_t keep)
+{
+    void *p = malloc(size);
+    if (p == NULL) {
+        return NULL;                        /* the old block stays, as realloc leaves it */
+    }
+    if (keep > 0) {
+        memcpy(p, old, keep < size ? keep : size);
+    }
+    free(old);
+    return p;
+}
+#else
+#define TPA__RESIZE_IN_PLACE 1
+#define tpa__list_realloc(old, size, keep) realloc((old), (size))
+#endif
+
+/* The fixed layout: one block, the items after the header. */
+#define TPA__DEF_LIST_ALLOC_FIXED(NAME, CT)                                                       \
     static inline int tpa_##NAME##_alloc(int64_t n, tpa_##NAME##_list **out)                      \
     {                                                                                             \
         int64_t len = 0;                                                                          \
@@ -893,6 +1310,163 @@ out_of_range:
         *out = l;                                                                                 \
         return 0;                                                                                 \
     }                                                                                             \
+    static inline void tpa_##NAME##__free(tpa_##NAME##_list *l)                                   \
+    {                                                                                             \
+        free(l);                                                                                  \
+    }
+
+/* Tier S2a, the growable layout: the header, and the items in a block of `cap` slots (NULL while cap is 0). The
+ * growth policy is CPython's list_resize (Objects/listobject.c, 3.15): keep the block while the new length is
+ * within [cap/2, cap], else allocate (n + n/8 + 6) & ~3 slots, or (n + 3) & ~3 when the jump is larger than that
+ * over-allocation, and nothing for an empty list. The policy is not observable (sys.getsizeof is not exposed); it
+ * sets the amortised cost of append. A failed resize leaves the list as it was, except a failed shrink, which keeps
+ * the old block (it holds the n items), sets the length and returns 1 with nothing recorded in `tpa_exc` (a shrink
+ * only fails to give memory back, and the caller goes on as if it had succeeded). */
+#define TPA__DEF_LIST_ALLOC_GROW(NAME, CT)                                                        \
+    static inline int tpa_##NAME##__resize(tpa_##NAME##_list *l, int64_t n)                       \
+    {                                                                                             \
+        uint64_t want;                                                                            \
+        CT *d;                                                                                    \
+        if (TPA__RESIZE_IN_PLACE && l->cap >= n && n >= (l->cap >> 1)) {                         \
+            l->len = n;                                                                           \
+            return 0;                                                                             \
+        }                                                                                         \
+        want = ((uint64_t)n + ((uint64_t)n >> 3) + 6u) & ~(uint64_t)3;                            \
+        if ((uint64_t)(n - l->len) > want - (uint64_t)n) {                                        \
+            want = ((uint64_t)n + 3u) & ~(uint64_t)3;                                             \
+        }                                                                                         \
+        if (n == 0) {                                                                             \
+            want = 0;                                                                             \
+        }                                                                                         \
+        if (want > (uint64_t)(SIZE_MAX / sizeof(CT)) || want > (uint64_t)INT64_MAX) {             \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        if (want == 0) {                                                                          \
+            free(l->d);                                                                           \
+            d = NULL;                                                                             \
+        }                                                                                         \
+        else {                                                                                    \
+            d = (CT *)tpa__list_realloc(l->d, (size_t)want * sizeof(CT),                          \
+                                        (size_t)(l->len < n ? l->len : n) * sizeof(CT));          \
+            if (d == NULL) {                                                                      \
+                if (n < l->len) {           /* (a shrink: no record, see above) */                \
+                    l->len = n;                                                                   \
+                    return 1;                                                                     \
+                }                                                                                 \
+                return tpa_raise(TPA_MemoryError, "");                                            \
+            }                                                                                     \
+        }                                                                                         \
+        l->d = d;                                                                                 \
+        l->cap = (int64_t)want;                                                                   \
+        l->len = n;                                                                               \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline int tpa_##NAME##_alloc(int64_t n, tpa_##NAME##_list **out)                      \
+    {                                                                                             \
+        tpa_##NAME##_list *l = (tpa_##NAME##_list *)calloc(1, sizeof(tpa_##NAME##_list));         \
+        if (l == NULL) {                                                                          \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        if (n < 0) {                                                                              \
+            n = 0;                      /* `[x] * -1 == []` */                                    \
+        }                                                                                         \
+        if (n > 0) {                                                                              \
+            if ((uint64_t)n > (uint64_t)(SIZE_MAX / sizeof(CT))) {                                \
+                free(l);                                                                          \
+                return tpa_raise(TPA_MemoryError, "");                                            \
+            }                                                                                     \
+            l->d = (CT *)malloc((size_t)n * sizeof(CT));                                          \
+            if (l->d == NULL) {                                                                   \
+                free(l);                                                                          \
+                return tpa_raise(TPA_MemoryError, "");                                            \
+            }                                                                                     \
+        }                                                                                         \
+        l->rc = 1;                                                                                \
+        l->len = n;                                                                               \
+        l->cap = n;                                                                               \
+        *out = l;                                                                                 \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline void tpa_##NAME##__free(tpa_##NAME##_list *l)                                   \
+    {                                                                                             \
+        free(l->d);                                                                               \
+        free(l);                                                                                  \
+    }                                                                                             \
+    static inline int tpa_##NAME##_append(tpa_##NAME##_list *l, CT v)                             \
+    {                                                                                             \
+        if (tpa_##NAME##__resize(l, l->len + 1)) {                                                \
+            return -1;                                                                            \
+        }                                                                                         \
+        l->d[l->len - 1] = v;                                                                     \
+        return 0;                                                                                 \
+    }                                                                                             \
+    /* list.insert: CPython's clamping (ins1: a negative index counts from the end, then 0 .. len) */ \
+    static inline int tpa_##NAME##_insert(tpa_##NAME##_list *l, int64_t i, CT v)                  \
+    {                                                                                             \
+        int64_t n = l->len;                                                                       \
+        if (i < 0) {                                                                              \
+            i += n;                                                                               \
+            if (i < 0) {                                                                          \
+                i = 0;                                                                            \
+            }                                                                                     \
+        }                                                                                         \
+        if (i > n) {                                                                              \
+            i = n;                                                                                \
+        }                                                                                         \
+        if (tpa_##NAME##__resize(l, n + 1)) {                                                     \
+            return -1;                                                                            \
+        }                                                                                         \
+        memmove(l->d + i + 1, l->d + i, (size_t)(n - i) * sizeof(CT));                            \
+        l->d[i] = v;                                                                              \
+        return 0;                                                                                 \
+    }                                                                                             \
+    /* list.extend / `+=` of a list of the same kind, possibly `l` itself (the list doubles) */  \
+    static inline int tpa_##NAME##_extend(tpa_##NAME##_list *l, const tpa_##NAME##_list *o)       \
+    {                                                                                             \
+        int64_t n = l->len, m = o->len;                                                           \
+        if (m == 0) {                                                                             \
+            return 0;                                                                             \
+        }                                                                                         \
+        if (tpa_##NAME##__resize(l, n + m)) {                                                     \
+            return -1;                                                                            \
+        }                                                                                         \
+        memcpy(l->d + n, o->d, (size_t)m * sizeof(CT));   /* (o == l: o->d is the moved block) */ \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline void tpa_##NAME##_clear(tpa_##NAME##_list *l)                                   \
+    {                                                                                             \
+        free(l->d);                                                                               \
+        l->d = NULL;                                                                              \
+        l->len = 0;                                                                               \
+        l->cap = 0;                                                                               \
+    }                                                                                             \
+    /* list.pop(): Objects/listobject.c list_pop_impl, the empty test first, then the index */    \
+    static inline int tpa_##NAME##_pop(tpa_##NAME##_list *l, int has_index, int64_t i, CT *out)   \
+    {                                                                                             \
+        int64_t n = l->len;                                                                       \
+        CT v;                                                                                     \
+        if (n == 0) {                                                                             \
+            return tpa_raise(TPA_IndexError, "pop from empty list");                              \
+        }                                                                                         \
+        if (!has_index) {                                                                         \
+            i = n - 1;                                                                            \
+        }                                                                                         \
+        if (i < 0) {                                                                              \
+            i += n;                                                                               \
+        }                                                                                         \
+        if (i < 0 || i >= n) {                                                                    \
+            return tpa_raise(TPA_IndexError, "pop index out of range");                           \
+        }                                                                                         \
+        v = l->d[i];                                                                              \
+        memmove(l->d + i, l->d + i + 1, (size_t)(n - i - 1) * sizeof(CT));                        \
+        if (tpa_##NAME##__resize(l, n - 1)) {   /* a shrink only fails to give memory back:    */ \
+            l->len = n - 1;                     /* the list is one shorter all the same, and   */ \
+        }                                       /* nothing is recorded in tpa_exc (resize)     */ \
+        *out = v;                                                                                 \
+        return 0;                                                                                 \
+    }
+
+#define TPA__DEF_LIST(NAME, CT)                                                                   \
     static inline int tpa_##NAME##_fill(int64_t n, CT v, tpa_##NAME##_list **out)                 \
     {                                                                                             \
         int64_t i;                                                                                \
@@ -923,12 +1497,1327 @@ out_of_range:
     static inline void tpa_##NAME##_release(tpa_##NAME##_list *l)                                 \
     {                                                                                             \
         if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {                                                 \
-            free(l);                                                                              \
+            tpa_##NAME##__free(l);                                                                \
+        }                                                                                         \
+    }                                                                                             \
+    /* list.reverse() */                                                                          \
+    static inline TPA_UNUSED void tpa_##NAME##_reverse(tpa_##NAME##_list *l)                      \
+    {                                                                                             \
+        int64_t i, j;                                                                             \
+        for (i = 0, j = l->len - 1; i < j; i++, j--) {                                            \
+            CT t = l->d[i];                                                                       \
+            l->d[i] = l->d[j];                                                                    \
+            l->d[j] = t;                                                                          \
         }                                                                                         \
     }
+#if defined(TPA_GROW_F64)
+TPA__DEF_LIST_ALLOC_GROW(f64, double)
+#else
+TPA__DEF_LIST_ALLOC_FIXED(f64, double)
+#endif
+#if defined(TPA_GROW_I64)
+TPA__DEF_LIST_ALLOC_GROW(i64, int64_t)
+#else
+TPA__DEF_LIST_ALLOC_FIXED(i64, int64_t)
+#endif
 TPA__DEF_LIST(f64, double)
 TPA__DEF_LIST(i64, int64_t)
 #undef TPA__DEF_LIST
+
+/* Tier S2c: list.sort() and sorted(), CPython's own listsort (Objects/listobject.c of CPython 3.15.0rc1, the embedded
+ * version: binarysort, count_run, gallop_left / gallop_right, merge_lo / merge_hi, merge_at, the powersort merge order
+ * of found_new_run and powerloop, merge_force_collapse, the minrun of each run from minrun_next (3.15; 3.14 computed one
+ * minrun for the whole list, which orders NaN differently), list_sort_impl), ported as it is for a list without a key
+ * function, so the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. Only
+ * `<` is used, as ISLT; the items are moved, never copied (a permutation: the references are unchanged). With no key
+ * every special-cased compare of CPython (unsafe_long_compare, unsafe_float_compare, unsafe_latin_compare) is the
+ * type's `<`, which LT is. A comparison cannot fail here, so the only error is MemoryError for the merge memory.
+ * TPA__DEF_SORT(NAME, T, LT) defines `NAME__listsort(T *items, int64_t n, int reverse)`: 0, or -1 with the error. */
+#define TPA_SORT_MIN_GALLOP 7
+#define TPA_SORT_TEMP_SIZE 256
+#define TPA_SORT_MAX_MINRUN 64
+#define TPA_SORT_MAX_PENDING 64
+#define TPA__DEF_SORT(NAME, T, LT)                                                                  \
+    typedef struct { T *base; int64_t len; int power; } NAME##__run;                                 \
+    typedef struct {                                                                                 \
+        int64_t min_gallop;                                                                          \
+        int64_t listlen;                                                                             \
+        T *basekeys;                                                                                 \
+        T *a;                                                                                        \
+        int64_t alloced;                                                                             \
+        int n;                                                                                       \
+        int64_t mr_current, mr_e, mr_mask;                                                           \
+        NAME##__run pending[TPA_SORT_MAX_PENDING];                                                   \
+        T temparray[TPA_SORT_TEMP_SIZE];                                                             \
+    } NAME##__ms;                                                                                    \
+    static TPA_UNUSED void NAME##__reverse(T *lo, T *hi)                                             \
+    {                                                                                                \
+        --hi;                                                                                        \
+        while (lo < hi) {                                                                            \
+            T t = *lo;                                                                               \
+            *lo = *hi;                                                                               \
+            *hi = t;                                                                                 \
+            ++lo;                                                                                    \
+            --hi;                                                                                    \
+        }                                                                                            \
+    }                                                                                                \
+    /* binarysort: a[:ok] is sorted; a stable binary insertion sort of a[:n] */                      \
+    static TPA_UNUSED void NAME##__binarysort(T *a, int64_t n, int64_t ok)                           \
+    {                                                                                                \
+        int64_t L, R, M;                                                                             \
+        T pivot;                                                                                     \
+        if (!ok)                                                                                     \
+            ++ok;                                                                                    \
+        for (; ok < n; ++ok) {                                                                       \
+            L = 0;                                                                                   \
+            R = ok;                                                                                  \
+            pivot = a[ok];                                                                           \
+            do {                                                                                     \
+                M = (L + R) >> 1;                                                                    \
+                if (LT(pivot, a[M]))                                                                 \
+                    R = M;                                                                           \
+                else                                                                                 \
+                    L = M + 1;                                                                       \
+            } while (L < R);                                                                         \
+            for (M = ok; M > L; --M)                                                                 \
+                a[M] = a[M - 1];                                                                     \
+            a[L] = pivot;                                                                            \
+        }                                                                                            \
+    }                                                                                                \
+    /* count_run: the length of the run at lo, made ascending in place (equal subruns of a           \
+     * descending run reversed on the fly, as REVERSE_LAST_NEQ does) */                              \
+    static TPA_UNUSED int64_t NAME##__count_run(T *lo, int64_t nremaining)                           \
+    {                                                                                                \
+        int64_t n, neq;                                                                              \
+        for (n = 1; n < nremaining; ++n) {                                                           \
+            if (LT(lo[n], lo[n - 1]))                                                                \
+                break;                                                                               \
+        }                                                                                            \
+        if (n == nremaining)                                                                         \
+            return n;                                                                                \
+        if (n > 1) {                                                                                 \
+            if (LT(lo[0], lo[n - 1]))                                                                \
+                return n;                                                                            \
+            NAME##__reverse(lo, lo + n);                                                             \
+        }                                                                                            \
+        ++n;                                                                                         \
+        neq = 0;                                                                                     \
+        for (; n < nremaining; ++n) {                                                                \
+            if (LT(lo[n], lo[n - 1])) {                                                              \
+                if (neq) {                                                                           \
+                    ++neq;                                                                           \
+                    NAME##__reverse(lo + (n - neq), lo + n);                                         \
+                    neq = 0;                                                                         \
+                }                                                                                    \
+            }                                                                                        \
+            else {                                                                                   \
+                if (LT(lo[n - 1], lo[n]))                                                            \
+                    break;                                                                           \
+                else                                                                                 \
+                    ++neq;                                                                           \
+            }                                                                                        \
+        }                                                                                            \
+        if (neq) {                                                                                   \
+            ++neq;                                                                                   \
+            NAME##__reverse(lo + (n - neq), lo + n);                                                 \
+            neq = 0;                                                                                 \
+        }                                                                                            \
+        NAME##__reverse(lo, lo + n);                                                                 \
+        for (; n < nremaining; ++n) {                                                                \
+            if (LT(lo[n], lo[n - 1]))                                                                \
+                break;                                                                               \
+        }                                                                                            \
+        return n;                                                                                    \
+    }                                                                                                \
+    /* gallop_left: k with a[k-1] < key <= a[k] */                                                   \
+    static TPA_UNUSED int64_t NAME##__gallop_left(T key, T *a, int64_t n, int64_t hint)              \
+    {                                                                                                \
+        int64_t ofs, lastofs, k;                                                                     \
+        a += hint;                                                                                   \
+        lastofs = 0;                                                                                 \
+        ofs = 1;                                                                                     \
+        if (LT(*a, key)) {                                                                           \
+            const int64_t maxofs = n - hint;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(a[ofs], key)) {                                                               \
+                    lastofs = ofs;                                                                   \
+                    ofs = (ofs << 1) + 1;                                                            \
+                }                                                                                    \
+                else                                                                                 \
+                    break;                                                                           \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            lastofs += hint;                                                                         \
+            ofs += hint;                                                                             \
+        }                                                                                            \
+        else {                                                                                       \
+            const int64_t maxofs = hint + 1;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(*(a - ofs), key))                                                             \
+                    break;                                                                           \
+                lastofs = ofs;                                                                       \
+                ofs = (ofs << 1) + 1;                                                                \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            k = lastofs;                                                                             \
+            lastofs = hint - ofs;                                                                    \
+            ofs = hint - k;                                                                          \
+        }                                                                                            \
+        a -= hint;                                                                                   \
+        ++lastofs;                                                                                   \
+        while (lastofs < ofs) {                                                                      \
+            int64_t m = lastofs + ((ofs - lastofs) >> 1);                                            \
+            if (LT(a[m], key))                                                                       \
+                lastofs = m + 1;                                                                     \
+            else                                                                                     \
+                ofs = m;                                                                             \
+        }                                                                                            \
+        return ofs;                                                                                  \
+    }                                                                                                \
+    /* gallop_right: k with a[k-1] <= key < a[k] */                                                  \
+    static TPA_UNUSED int64_t NAME##__gallop_right(T key, T *a, int64_t n, int64_t hint)             \
+    {                                                                                                \
+        int64_t ofs, lastofs, k;                                                                     \
+        a += hint;                                                                                   \
+        lastofs = 0;                                                                                 \
+        ofs = 1;                                                                                     \
+        if (LT(key, *a)) {                                                                           \
+            const int64_t maxofs = hint + 1;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(key, *(a - ofs))) {                                                           \
+                    lastofs = ofs;                                                                   \
+                    ofs = (ofs << 1) + 1;                                                            \
+                }                                                                                    \
+                else                                                                                 \
+                    break;                                                                           \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            k = lastofs;                                                                             \
+            lastofs = hint - ofs;                                                                    \
+            ofs = hint - k;                                                                          \
+        }                                                                                            \
+        else {                                                                                       \
+            const int64_t maxofs = n - hint;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(key, a[ofs]))                                                                 \
+                    break;                                                                           \
+                lastofs = ofs;                                                                       \
+                ofs = (ofs << 1) + 1;                                                                \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            lastofs += hint;                                                                         \
+            ofs += hint;                                                                             \
+        }                                                                                            \
+        a -= hint;                                                                                   \
+        ++lastofs;                                                                                   \
+        while (lastofs < ofs) {                                                                      \
+            int64_t m = lastofs + ((ofs - lastofs) >> 1);                                            \
+            if (LT(key, a[m]))                                                                       \
+                ofs = m;                                                                             \
+            else                                                                                     \
+                lastofs = m + 1;                                                                     \
+        }                                                                                            \
+        return ofs;                                                                                  \
+    }                                                                                                \
+    static TPA_UNUSED void NAME##__freemem(NAME##__ms *ms)                                           \
+    {                                                                                                \
+        if (ms->a != ms->temparray) {                                                                \
+            free(ms->a);                                                                             \
+            ms->a = NULL;                                                                            \
+        }                                                                                            \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__getmem(NAME##__ms *ms, int64_t need)                               \
+    {                                                                                                \
+        if (need <= ms->alloced)                                                                     \
+            return 0;                                                                                \
+        NAME##__freemem(ms);                                                                         \
+        if ((uint64_t)need > (uint64_t)INT64_MAX / sizeof(T)) {                                      \
+            ms->a = ms->temparray;                                                                   \
+            ms->alloced = TPA_SORT_TEMP_SIZE;                                                        \
+            return tpa_raise(TPA_MemoryError, "");                                                   \
+        }                                                                                            \
+        ms->a = (T *)malloc((size_t)need * sizeof(T));                                               \
+        if (ms->a != NULL) {                                                                         \
+            ms->alloced = need;                                                                      \
+            return 0;                                                                                \
+        }                                                                                            \
+        ms->a = ms->temparray;                                                                       \
+        ms->alloced = TPA_SORT_TEMP_SIZE;                                                            \
+        return tpa_raise(TPA_MemoryError, "");                                                       \
+    }                                                                                                \
+    /* merge_lo: merge a[:na] and b[:nb] (b = a + na) in place, na <= nb */                          \
+    static TPA_UNUSED int NAME##__merge_lo(NAME##__ms *ms, T *ssa, int64_t na, T *ssb, int64_t nb)   \
+    {                                                                                                \
+        int64_t k, min_gallop;                                                                       \
+        T *dest;                                                                                     \
+        int result = -1;                                                                             \
+        if (NAME##__getmem(ms, na) < 0)                                                              \
+            return -1;                                                                               \
+        memcpy(ms->a, ssa, (size_t)na * sizeof(T));                                                  \
+        dest = ssa;                                                                                  \
+        ssa = ms->a;                                                                                 \
+        *dest++ = *ssb++;                                                                            \
+        --nb;                                                                                        \
+        if (nb == 0)                                                                                 \
+            goto Succeed;                                                                            \
+        if (na == 1)                                                                                 \
+            goto CopyB;                                                                              \
+        min_gallop = ms->min_gallop;                                                                 \
+        for (;;) {                                                                                   \
+            int64_t acount = 0, bcount = 0;                                                          \
+            for (;;) {                                                                               \
+                if (LT(ssb[0], ssa[0])) {                                                            \
+                    *dest++ = *ssb++;                                                                \
+                    ++bcount;                                                                        \
+                    acount = 0;                                                                      \
+                    --nb;                                                                            \
+                    if (nb == 0)                                                                     \
+                        goto Succeed;                                                                \
+                    if (bcount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+                else {                                                                               \
+                    *dest++ = *ssa++;                                                                \
+                    ++acount;                                                                        \
+                    bcount = 0;                                                                      \
+                    --na;                                                                            \
+                    if (na == 1)                                                                     \
+                        goto CopyB;                                                                  \
+                    if (acount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+            }                                                                                        \
+            ++min_gallop;                                                                            \
+            do {                                                                                     \
+                min_gallop -= min_gallop > 1;                                                        \
+                ms->min_gallop = min_gallop;                                                         \
+                k = NAME##__gallop_right(ssb[0], ssa, na, 0);                                        \
+                acount = k;                                                                          \
+                if (k) {                                                                             \
+                    memcpy(dest, ssa, (size_t)k * sizeof(T));                                        \
+                    dest += k;                                                                       \
+                    ssa += k;                                                                        \
+                    na -= k;                                                                         \
+                    if (na == 1)                                                                     \
+                        goto CopyB;                                                                  \
+                    if (na == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest++ = *ssb++;                                                                    \
+                --nb;                                                                                \
+                if (nb == 0)                                                                         \
+                    goto Succeed;                                                                    \
+                k = NAME##__gallop_left(ssa[0], ssb, nb, 0);                                         \
+                bcount = k;                                                                          \
+                if (k) {                                                                             \
+                    memmove(dest, ssb, (size_t)k * sizeof(T));                                       \
+                    dest += k;                                                                       \
+                    ssb += k;                                                                        \
+                    nb -= k;                                                                         \
+                    if (nb == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest++ = *ssa++;                                                                    \
+                --na;                                                                                \
+                if (na == 1)                                                                         \
+                    goto CopyB;                                                                      \
+            } while (acount >= TPA_SORT_MIN_GALLOP || bcount >= TPA_SORT_MIN_GALLOP);                \
+            ++min_gallop;                                                                            \
+            ms->min_gallop = min_gallop;                                                             \
+        }                                                                                            \
+    Succeed:                                                                                         \
+        result = 0;                                                                                  \
+        if (na)                                                                                      \
+            memcpy(dest, ssa, (size_t)na * sizeof(T));                                               \
+        return result;                                                                               \
+    CopyB:                                                                                           \
+        memmove(dest, ssb, (size_t)nb * sizeof(T));                                                  \
+        dest[nb] = ssa[0];                                                                           \
+        return 0;                                                                                    \
+    }                                                                                                \
+    /* merge_hi: merge a[:na] and b[:nb] (b = a + na) in place, na >= nb */                          \
+    static TPA_UNUSED int NAME##__merge_hi(NAME##__ms *ms, T *ssa, int64_t na, T *ssb, int64_t nb)   \
+    {                                                                                                \
+        int64_t k, min_gallop;                                                                       \
+        T *dest;                                                                                     \
+        T *basea;                                                                                    \
+        T *baseb;                                                                                    \
+        int result = -1;                                                                             \
+        if (NAME##__getmem(ms, nb) < 0)                                                              \
+            return -1;                                                                               \
+        dest = ssb + (nb - 1);                                                                       \
+        memcpy(ms->a, ssb, (size_t)nb * sizeof(T));                                                  \
+        basea = ssa;                                                                                 \
+        baseb = ms->a;                                                                               \
+        ssb = ms->a + nb - 1;                                                                        \
+        ssa += na - 1;                                                                               \
+        *dest-- = *ssa--;                                                                            \
+        --na;                                                                                        \
+        if (na == 0)                                                                                 \
+            goto Succeed;                                                                            \
+        if (nb == 1)                                                                                 \
+            goto CopyA;                                                                              \
+        min_gallop = ms->min_gallop;                                                                 \
+        for (;;) {                                                                                   \
+            int64_t acount = 0, bcount = 0;                                                          \
+            for (;;) {                                                                               \
+                if (LT(ssb[0], ssa[0])) {                                                            \
+                    *dest-- = *ssa--;                                                                \
+                    ++acount;                                                                        \
+                    bcount = 0;                                                                      \
+                    --na;                                                                            \
+                    if (na == 0)                                                                     \
+                        goto Succeed;                                                                \
+                    if (acount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+                else {                                                                               \
+                    *dest-- = *ssb--;                                                                \
+                    ++bcount;                                                                        \
+                    acount = 0;                                                                      \
+                    --nb;                                                                            \
+                    if (nb == 1)                                                                     \
+                        goto CopyA;                                                                  \
+                    if (bcount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+            }                                                                                        \
+            ++min_gallop;                                                                            \
+            do {                                                                                     \
+                min_gallop -= min_gallop > 1;                                                        \
+                ms->min_gallop = min_gallop;                                                         \
+                k = NAME##__gallop_right(ssb[0], basea, na, na - 1);                                 \
+                k = na - k;                                                                          \
+                acount = k;                                                                          \
+                if (k) {                                                                             \
+                    dest -= k;                                                                       \
+                    ssa -= k;                                                                        \
+                    memmove(dest + 1, ssa + 1, (size_t)k * sizeof(T));                               \
+                    na -= k;                                                                         \
+                    if (na == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest-- = *ssb--;                                                                    \
+                --nb;                                                                                \
+                if (nb == 1)                                                                         \
+                    goto CopyA;                                                                      \
+                k = NAME##__gallop_left(ssa[0], baseb, nb, nb - 1);                                  \
+                k = nb - k;                                                                          \
+                bcount = k;                                                                          \
+                if (k) {                                                                             \
+                    dest -= k;                                                                       \
+                    ssb -= k;                                                                        \
+                    memcpy(dest + 1, ssb + 1, (size_t)k * sizeof(T));                                \
+                    nb -= k;                                                                         \
+                    if (nb == 1)                                                                     \
+                        goto CopyA;                                                                  \
+                    if (nb == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest-- = *ssa--;                                                                    \
+                --na;                                                                                \
+                if (na == 0)                                                                         \
+                    goto Succeed;                                                                    \
+            } while (acount >= TPA_SORT_MIN_GALLOP || bcount >= TPA_SORT_MIN_GALLOP);                \
+            ++min_gallop;                                                                            \
+            ms->min_gallop = min_gallop;                                                             \
+        }                                                                                            \
+    Succeed:                                                                                         \
+        result = 0;                                                                                  \
+        if (nb)                                                                                      \
+            memcpy(dest - (nb - 1), baseb, (size_t)nb * sizeof(T));                                  \
+        return result;                                                                               \
+    CopyA:                                                                                           \
+        memmove(dest + 1 - na, ssa + 1 - na, (size_t)na * sizeof(T));                                \
+        dest -= na;                                                                                  \
+        ssa -= na;                                                                                   \
+        dest[0] = ssb[0];                                                                            \
+        return 0;                                                                                    \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__merge_at(NAME##__ms *ms, int64_t i)                                \
+    {                                                                                                \
+        T *ssa = ms->pending[i].base;                                                                \
+        T *ssb = ms->pending[i + 1].base;                                                            \
+        int64_t na = ms->pending[i].len, nb = ms->pending[i + 1].len, k;                             \
+        ms->pending[i].len = na + nb;                                                                \
+        if (i == ms->n - 3)                                                                          \
+            ms->pending[i + 1] = ms->pending[i + 2];                                                 \
+        --ms->n;                                                                                     \
+        k = NAME##__gallop_right(*ssb, ssa, na, 0);                                                  \
+        ssa += k;                                                                                    \
+        na -= k;                                                                                     \
+        if (na == 0)                                                                                 \
+            return 0;                                                                                \
+        nb = NAME##__gallop_left(ssa[na - 1], ssb, nb, nb - 1);                                      \
+        if (nb <= 0)                                                                                 \
+            return (int)nb;                                                                          \
+        if (na <= nb)                                                                                \
+            return NAME##__merge_lo(ms, ssa, na, ssb, nb);                                           \
+        else                                                                                         \
+            return NAME##__merge_hi(ms, ssa, na, ssb, nb);                                           \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__powerloop(int64_t s1, int64_t n1, int64_t n2, int64_t n)           \
+    {                                                                                                \
+        int result = 0;                                                                              \
+        int64_t a = 2 * s1 + n1;                                                                     \
+        int64_t b = a + n1 + n2;                                                                     \
+        for (;;) {                                                                                   \
+            ++result;                                                                                \
+            if (a >= n) {                                                                            \
+                a -= n;                                                                              \
+                b -= n;                                                                              \
+            }                                                                                        \
+            else if (b >= n) {                                                                       \
+                break;                                                                               \
+            }                                                                                        \
+            a <<= 1;                                                                                 \
+            b <<= 1;                                                                                 \
+        }                                                                                            \
+        return result;                                                                               \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__found_new_run(NAME##__ms *ms, int64_t n2)                          \
+    {                                                                                                \
+        if (ms->n) {                                                                                 \
+            NAME##__run *p = ms->pending;                                                            \
+            int64_t s1 = p[ms->n - 1].base - ms->basekeys;                                           \
+            int64_t n1 = p[ms->n - 1].len;                                                           \
+            int power = NAME##__powerloop(s1, n1, n2, ms->listlen);                                  \
+            while (ms->n > 1 && p[ms->n - 2].power > power) {                                        \
+                if (NAME##__merge_at(ms, ms->n - 2) < 0)                                             \
+                    return -1;                                                                       \
+            }                                                                                        \
+            p[ms->n - 1].power = power;                                                              \
+        }                                                                                            \
+        return 0;                                                                                    \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__force_collapse(NAME##__ms *ms)                                     \
+    {                                                                                                \
+        NAME##__run *p = ms->pending;                                                                \
+        while (ms->n > 1) {                                                                          \
+            int64_t n = ms->n - 2;                                                                   \
+            if (n > 0 && p[n - 1].len < p[n + 1].len)                                                \
+                --n;                                                                                 \
+            if (NAME##__merge_at(ms, n) < 0)                                                         \
+                return -1;                                                                           \
+        }                                                                                            \
+        return 0;                                                                                    \
+    }                                                                                                \
+    /* minrun_next: the next minrun, listlen / 2**e in infinite precision spread over the runs */      \
+    static TPA_UNUSED int64_t NAME##__minrun_next(NAME##__ms *ms)                                    \
+    {                                                                                                \
+        int64_t result;                                                                              \
+        ms->mr_current += ms->listlen;                                                               \
+        result = ms->mr_current >> ms->mr_e;                                                         \
+        ms->mr_current &= ms->mr_mask;                                                               \
+        return result;                                                                               \
+    }                                                                                                \
+    /* list_sort_impl without a key: reversed first and last for reverse=True (stability) */         \
+    static TPA_UNUSED int NAME##__listsort(T *items, int64_t size, int reverse)                      \
+    {                                                                                                \
+        NAME##__ms ms;                                                                               \
+        int64_t nremaining, minrun;                                                                  \
+        T *lo = items;                                                                               \
+        int rc = -1;                                                                                 \
+        ms.alloced = TPA_SORT_TEMP_SIZE;                                                             \
+        ms.a = ms.temparray;                                                                         \
+        ms.n = 0;                                                                                    \
+        ms.min_gallop = TPA_SORT_MIN_GALLOP;                                                         \
+        ms.listlen = size;                                                                           \
+        ms.basekeys = items;                                                                         \
+        ms.mr_e = 0;                                                                                 \
+        while (size >> ms.mr_e >= TPA_SORT_MAX_MINRUN)                                               \
+            ++ms.mr_e;                                                                               \
+        ms.mr_mask = ((int64_t)1 << ms.mr_e) - 1;                                                    \
+        ms.mr_current = 0;                                                                           \
+        nremaining = size;                                                                           \
+        if (nremaining < 2)                                                                          \
+            return 0;                                                                                \
+        if (reverse)                                                                                 \
+            NAME##__reverse(items, items + size);                                                    \
+        do {                                                                                         \
+            int64_t n;                                                                               \
+            minrun = NAME##__minrun_next(&ms);                                                       \
+            n = NAME##__count_run(lo, nremaining);                                                   \
+            if (n < minrun) {                                                                        \
+                const int64_t force = nremaining <= minrun ? nremaining : minrun;                    \
+                NAME##__binarysort(lo, force, n);                                                    \
+                n = force;                                                                           \
+            }                                                                                        \
+            if (NAME##__found_new_run(&ms, n) < 0)                                                   \
+                goto fail;                                                                           \
+            ms.pending[ms.n].base = lo;                                                              \
+            ms.pending[ms.n].len = n;                                                                \
+            ++ms.n;                                                                                  \
+            lo += n;                                                                                 \
+            nremaining -= n;                                                                         \
+        } while (nremaining);                                                                        \
+        if (NAME##__force_collapse(&ms) < 0)                                                         \
+            goto fail;                                                                               \
+        rc = 0;                                                                                      \
+    fail:                                                                                            \
+        if (reverse)                                                                                 \
+            NAME##__reverse(items, items + size);                                                    \
+        NAME##__freemem(&ms);                                                                        \
+        return rc;                                                                                   \
+    }
+#define TPA__LT_NUM(a, b) ((a) < (b))
+TPA__DEF_SORT(tpa_sort_i64, int64_t, TPA__LT_NUM)
+TPA__DEF_SORT(tpa_sort_f64, double, TPA__LT_NUM)
+/* list.sort() of a list[int] of the RAW kind and of a list[float] */
+static inline TPA_UNUSED int tpa_i64_sort(tpa_i64_list *l, int reverse)
+{
+    return tpa_sort_i64__listsort(l->d, l->len, reverse);
+}
+static inline TPA_UNUSED int tpa_f64_sort(tpa_f64_list *l, int reverse)
+{
+    return tpa_sort_f64__listsort(l->d, l->len, reverse);
+}
+
+/* Tier S2c: list.sort(key=k) and sorted(it, key=k). list_sort_impl computes every key first, then sorts the keys and
+ * moves the items with them (its sortslice of keys and values). The same order comes from sorting (key, position)
+ * pairs by key only with the same listsort (TPA__DEF_SORT is a permutation that reads only LT, so the pairs move as
+ * the keys do, and reverse reverses them before and after as it reverses keys and values), then moving each list's
+ * items by the positions (tpa_perm_apply: a permutation, the references are moved, never copied). The keys are
+ * computed by the generated code into a list before the sort; a list whose length is not the keys' is CPython's
+ * ValueError("list modified during sort"). The positions and the moving buffer are allocated before any item moves,
+ * so a MemoryError leaves every list as it was.
+ * TPA__DEF_KEYSORT(NAME, KT, LIST, LTK) defines `int NAME(tpa_perm *p, LIST *keys, int reverse, int64_t n, size_t esz)`:
+ * the positions into `*p` (free with tpa_perm_free), 0, or -1 with the error and `*p` empty. */
+typedef struct { int64_t n; int64_t *idx; char *tmp; } tpa_perm;
+static TPA_UNUSED void tpa_perm_free(tpa_perm *p)
+{
+    free(p->idx);
+    free(p->tmp);
+    p->idx = NULL;
+    p->tmp = NULL;
+    p->n = 0;
+}
+static TPA_UNUSED int tpa_sort_len_check(int64_t len, int64_t n)
+{
+    return len == n ? 0 : tpa_raise(TPA_ValueError, "list modified during sort");
+}
+static TPA_UNUSED int tpa_perm__alloc(tpa_perm *p, int64_t n, size_t esz)
+{
+    p->n = n;
+    p->idx = NULL;
+    p->tmp = NULL;
+    if (n <= 0) {
+        p->n = 0;
+        return 0;
+    }
+    if ((uint64_t)n > (uint64_t)SIZE_MAX / (esz > sizeof(int64_t) ? esz : sizeof(int64_t))) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    p->idx = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    p->tmp = (char *)malloc((size_t)n * esz);
+    if (p->idx == NULL || p->tmp == NULL) {
+        tpa_perm_free(p);
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    return 0;
+}
+/* the items of `d` (n of size `esz`) in the order of the positions: d'[j] = d[idx[j]] */
+static TPA_UNUSED void tpa_perm_apply(tpa_perm *p, void *d, size_t esz)
+{
+    char *b = (char *)d;
+    int64_t j;
+    if (p->n == 0) {
+        return;
+    }
+    for (j = 0; j < p->n; j++) {
+        memcpy(p->tmp + (size_t)j * esz, b + (size_t)p->idx[j] * esz, esz);
+    }
+    memcpy(b, p->tmp, (size_t)p->n * esz);
+}
+#define TPA__DEF_KEYSORT(NAME, KT, LIST, LTK)                                                        \
+    typedef struct { KT k; int64_t i; } NAME##__pair;                                                \
+    TPA__DEF_SORT(NAME##__s, NAME##__pair, LTK)                                                      \
+    static TPA_UNUSED int NAME(tpa_perm *p, LIST *keys, int reverse, int64_t n, size_t esz)          \
+    {                                                                                                \
+        NAME##__pair *pr;                                                                            \
+        int64_t j;                                                                                   \
+        p->n = 0;                                                                                    \
+        p->idx = NULL;                                                                               \
+        p->tmp = NULL;                                                                               \
+        if (tpa_sort_len_check(keys->len, n) || tpa_perm__alloc(p, n, esz)) {                        \
+            return -1;                                                                               \
+        }                                                                                            \
+        if (n == 0) {                                                                                \
+            return 0;                                                                                \
+        }                                                                                            \
+        pr = (NAME##__pair *)malloc((size_t)n * sizeof(NAME##__pair));                               \
+        if (pr == NULL) {                                                                            \
+            tpa_perm_free(p);                                                                        \
+            return tpa_raise(TPA_MemoryError, "");                                                   \
+        }                                                                                            \
+        for (j = 0; j < n; j++) {                                                                    \
+            pr[j].k = keys->d[j];                                                                    \
+            pr[j].i = j;                                                                             \
+        }                                                                                            \
+        if (NAME##__s__listsort(pr, n, reverse)) {                                                   \
+            free(pr);                                                                                \
+            tpa_perm_free(p);                                                                        \
+            return -1;                                                                               \
+        }                                                                                            \
+        for (j = 0; j < n; j++) {                                                                    \
+            p->idx[j] = pr[j].i;                                                                     \
+        }                                                                                            \
+        free(pr);                                                                                    \
+        return 0;                                                                                    \
+    }
+#define TPA__LT_KNUM(a, b) ((a).k < (b).k)
+TPA__DEF_KEYSORT(tpa_i64_keysort, int64_t, tpa_i64_list, TPA__LT_KNUM)
+TPA__DEF_KEYSORT(tpa_f64_keysort, double, tpa_f64_list, TPA__LT_KNUM)
+
+/* Tier S2a: searching a list[int] of the RAW kind (a list of float is never searched: NaN's identity, design 4.3.2).
+ * list.index(v): the first position, else ValueError("list.index(x): x not in list") (Objects/listobject.c
+ * list_index_impl since CPython 3.14, the baseline; the value is not formatted); list.count(v); `v in l`. */
+static inline TPA_UNUSED int tpa_i64_index(const tpa_i64_list *l, int64_t v, int64_t *out)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            *out = i;
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.index(x): x not in list");
+}
+
+static inline TPA_UNUSED int64_t tpa_i64_count(const tpa_i64_list *l, int64_t v)
+{
+    int64_t i, n = 0;
+    for (i = 0; i < l->len; i++) {
+        n += l->d[i] == v;
+    }
+    return n;
+}
+
+static inline TPA_UNUSED int tpa_i64_contains(const tpa_i64_list *l, int64_t v)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Tier S2a: list slices. The bounds `has` names (TPA_SLICE_*) adjusted to a list of `len` items as PySlice_Unpack and
+ * PySlice_AdjustIndices do (a bound outside int64 is clamped by the caller, as the str slice's are): the first index,
+ * the step and the number of items. ValueError("slice step cannot be zero"). */
+#ifndef TPA_SLICE_START
+#define TPA_SLICE_START 1
+#define TPA_SLICE_STOP 2
+#define TPA_SLICE_STEP 4
+#endif
+static inline int tpa__slice(int64_t len, int64_t start, int64_t stop, int64_t step, int has,
+                             int64_t *first, int64_t *by, int64_t *count)
+{
+    int64_t n = 0;
+    if (!(has & TPA_SLICE_STEP)) {
+        step = 1;
+    }
+    if (step == 0) {
+        return tpa_raise(TPA_ValueError, "slice step cannot be zero");
+    }
+    if (step < -INT64_MAX) {
+        step = -INT64_MAX;
+    }
+    if (!(has & TPA_SLICE_START)) {
+        start = step < 0 ? INT64_MAX : 0;
+    }
+    if (!(has & TPA_SLICE_STOP)) {
+        stop = step < 0 ? INT64_MIN : INT64_MAX;
+    }
+    if (start < 0) {
+        start += len;
+        if (start < 0) {
+            start = step < 0 ? -1 : 0;
+        }
+    }
+    else if (start >= len) {
+        start = step < 0 ? len - 1 : len;
+    }
+    if (stop < 0) {
+        stop += len;
+        if (stop < 0) {
+            stop = step < 0 ? -1 : 0;
+        }
+    }
+    else if (stop >= len) {
+        stop = step < 0 ? len - 1 : len;
+    }
+    if (step < 0) {
+        if (stop < start) {
+            n = (start - stop - 1) / (0 - step) + 1;
+        }
+    }
+    else if (start < stop) {
+        n = (stop - start - 1) / step + 1;
+    }
+    *first = start;
+    *by = step;
+    *count = n;
+    return 0;
+}
+
+/* `l * n` / `n * l`: the size check CPython's list_repeat makes (MemoryError past the largest list) */
+static inline int tpa__repeat_size(int64_t len, int64_t n, int64_t *total)
+{
+    if (n <= 0 || len == 0) {
+        *total = 0;
+        return 0;
+    }
+    if (len > INT64_MAX / n) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    *total = len * n;
+    return 0;
+}
+
+#define TPA__DEF_LIST_MAKE(NAME, CT)                                                              \
+    /* a + b: a new list */                                                                       \
+    static inline TPA_UNUSED int tpa_##NAME##_concat(const tpa_##NAME##_list *a,                  \
+                                                     const tpa_##NAME##_list *b,                  \
+                                                     tpa_##NAME##_list **out)                     \
+    {                                                                                             \
+        if (a->len > INT64_MAX - b->len) {                                                        \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        if (tpa_##NAME##_alloc(a->len + b->len, out)) {                                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        if (a->len > 0) {                                                                         \
+            memcpy((*out)->d, a->d, (size_t)a->len * sizeof(CT));                                 \
+        }                                                                                         \
+        if (b->len > 0) {                                                                         \
+            memcpy((*out)->d + a->len, b->d, (size_t)b->len * sizeof(CT));                        \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline TPA_UNUSED int tpa_##NAME##_repeat(const tpa_##NAME##_list *a, int64_t n,       \
+                                                     tpa_##NAME##_list **out)                     \
+    {                                                                                             \
+        int64_t total, k;                                                                         \
+        if (tpa__repeat_size(a->len, n, &total) || tpa_##NAME##_alloc(total, out)) {              \
+            return -1;                                                                            \
+        }                                                                                         \
+        for (k = 0; k < total; k += a->len) {                                                     \
+            memcpy((*out)->d + k, a->d, (size_t)a->len * sizeof(CT));                             \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static inline TPA_UNUSED int tpa_##NAME##_slice(const tpa_##NAME##_list *a, int64_t start,    \
+                                                    int64_t stop, int64_t step, int has,          \
+                                                    tpa_##NAME##_list **out)                      \
+    {                                                                                             \
+        int64_t first, by, n, k;                                                                  \
+        if (tpa__slice(a->len, start, stop, step, has, &first, &by, &n)                           \
+                || tpa_##NAME##_alloc(n, out)) {                                                  \
+            return -1;                                                                            \
+        }                                                                                         \
+        for (k = 0; k < n; k++) {                                                                 \
+            (*out)->d[k] = a->d[first + k * by];                                                  \
+        }                                                                                         \
+        return 0;                                                                                 \
+    }
+TPA__DEF_LIST_MAKE(f64, double)
+TPA__DEF_LIST_MAKE(i64, int64_t)
+#undef TPA__DEF_LIST_MAKE
+
+/* Tier S2a: `del l[i]`, `del l[a:b:c]` and `l[a:b:c] = o` of a growable list (Objects/listobject.c list_ass_subscript
+ * and list_ass_slice). `P` is the function prefix, `L` the list type, `CT` the item type, `RET` / `REL` retain and
+ * release an item (nothing for a list of numbers), `RESIZE` the list's resize. The list is left whole (its length and
+ * every slot) before any removed item is released, CPython's order (the S2 review, S3). */
+#define TPA__DEF_LIST_SPLICE(P, L, CT, RET, REL, RESIZE)                                           \
+    static TPA_UNUSED int P##delitem(L *l, int64_t i)                                             \
+    {                                                                                             \
+        int64_t slot, n = l->len;                                                                 \
+        CT gone;                                                                                  \
+        if (tpa_slot(n, i, 1, &slot)) {                                                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        gone = l->d[slot];                                                                        \
+        memmove(l->d + slot, l->d + slot + 1, (size_t)(n - slot - 1) * sizeof(CT));               \
+        if (RESIZE(l, n - 1)) {                                                                   \
+            l->len = n - 1;             /* a shrink only fails to give memory back */             \
+        }                                                                                         \
+        REL(gone);                                                                                \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static TPA_UNUSED int P##delslice(L *l, int64_t start, int64_t stop, int64_t step, int has)   \
+    {                                                                                             \
+        int64_t first, by, n, k, w, len = l->len;                                                 \
+        CT *gone;                                                                                 \
+        if (tpa__slice(len, start, stop, step, has, &first, &by, &n)) {                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        if (n <= 0) {                                                                             \
+            return 0;                                                                             \
+        }                                                                                         \
+        if (by < 0) {                   /* the same items, in increasing order */                 \
+            first += (n - 1) * by;                                                                \
+            by = -by;                                                                             \
+        }                                                                                         \
+        gone = (CT *)malloc((size_t)n * sizeof(CT));                                              \
+        if (gone == NULL) {                                                                       \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        for (k = 0, w = first; k < n; k++) {                                                      \
+            int64_t at = first + k * by, end = k + 1 < n ? at + by : len;                         \
+            gone[k] = l->d[at];                                                                   \
+            memmove(l->d + w, l->d + at + 1, (size_t)(end - at - 1) * sizeof(CT));                \
+            w += end - at - 1;                                                                    \
+        }                                                                                         \
+        if (RESIZE(l, len - n)) {                                                                 \
+            l->len = len - n;                                                                     \
+        }                                                                                         \
+        for (k = 0; k < n; k++) {                                                                 \
+            REL(gone[k]);                                                                         \
+        }                                                                                         \
+        free(gone);                                                                               \
+        return 0;                                                                                 \
+    }                                                                                             \
+    static TPA_UNUSED int P##setslice(L *l, int64_t start, int64_t stop, int64_t step, int has,   \
+                                      const L *o)                                                 \
+    {                                                                                             \
+        int64_t first, by, n, k, m = o->len, len = l->len;                                        \
+        CT *items;                      /* (one declarator each: CT may be a pointer type) */    \
+        CT *gone;                                                                                 \
+        if (tpa__slice(len, start, stop, step, has, &first, &by, &n)) {                           \
+            return -1;                                                                            \
+        }                                                                                         \
+        if (by != 1 && m != n) {                                                                  \
+            char msg[112];                                                                        \
+            snprintf(msg, sizeof msg, "attempt to assign sequence of size %lld to extended slice "  \
+                     "of size %lld", (long long)m, (long long)n);                                 \
+            return tpa_raise(TPA_ValueError, msg);                                                \
+        }                                                                                         \
+        /* the new items first (o may be l), each retained; the replaced ones kept for release */ \
+        items = (CT *)malloc((size_t)(m > 0 ? m : 1) * sizeof(CT));                               \
+        gone = (CT *)malloc((size_t)(n > 0 ? n : 1) * sizeof(CT));                                \
+        if (items == NULL || gone == NULL) {                                                      \
+            free(items);                                                                          \
+            free(gone);                                                                           \
+            return tpa_raise(TPA_MemoryError, "");                                                \
+        }                                                                                         \
+        for (k = 0; k < m; k++) {                                                                 \
+            items[k] = o->d[k];                                                                   \
+            RET(items[k]);                                                                        \
+        }                                                                                         \
+        if (by == 1) {                  /* list_ass_slice: replace n items at `first` by m */     \
+            if (n < 0) {                                                                          \
+                n = 0;                                                                            \
+            }                                                                                     \
+            for (k = 0; k < n; k++) {                                                             \
+                gone[k] = l->d[first + k];                                                        \
+            }                                                                                     \
+            if (m > n) {                                                                          \
+                if (RESIZE(l, len + m - n)) {                                                     \
+                    for (k = 0; k < m; k++) {                                                     \
+                        REL(items[k]);                                                            \
+                    }                                                                             \
+                    free(items);                                                                  \
+                    free(gone);                                                                   \
+                    return -1;                                                                    \
+                }                                                                                 \
+                memmove(l->d + first + m, l->d + first + n, (size_t)(len - first - n) * sizeof(CT)); \
+            }                                                                                     \
+            else if (m < n) {                                                                     \
+                memmove(l->d + first + m, l->d + first + n, (size_t)(len - first - n) * sizeof(CT)); \
+                if (RESIZE(l, len + m - n)) {                                                     \
+                    l->len = len + m - n;                                                         \
+                }                                                                                 \
+            }                                                                                     \
+            if (m > 0) {                                                                          \
+                memcpy(l->d + first, items, (size_t)m * sizeof(CT));                              \
+            }                                                                                     \
+        }                                                                                         \
+        else {                          /* an extended slice: one item for one item */            \
+            for (k = 0; k < n; k++) {                                                             \
+                gone[k] = l->d[first + k * by];                                                   \
+                l->d[first + k * by] = items[k];                                                  \
+            }                                                                                     \
+        }                                                                                         \
+        for (k = 0; k < n; k++) {                                                                 \
+            REL(gone[k]);                                                                         \
+        }                                                                                         \
+        free(items);                                                                              \
+        free(gone);                                                                               \
+        return 0;                                                                                 \
+    }
+#define TPA__NO_OWN(x) ((void)(x))
+#if defined(TPA_GROW_F64)
+TPA__DEF_LIST_SPLICE(tpa_f64_, tpa_f64_list, double, TPA__NO_OWN, TPA__NO_OWN, tpa_f64__resize)
+#endif
+#if defined(TPA_GROW_I64)
+TPA__DEF_LIST_SPLICE(tpa_i64_, tpa_i64_list, int64_t, TPA__NO_OWN, TPA__NO_OWN, tpa_i64__resize)
+#endif
+
+/* Tier S2a: a list of instances of one compiled class (`list[C]`, ir OBJ_LIST): owned references in a block that
+ * may move, the growable layout always (the type is new, so no earlier program's C changes). The element class's
+ * retain and release are carried by the list (generated `void *` wrappers of tpa_cls_<C>_retain / _release). An
+ * item is never NULL (a list[C] holds instances). Equality of items is identity (object.__eq__; a class that defines
+ * __eq__ is refused by the front end). Executables only: a list[C] never crosses a library boundary. */
+typedef void (*tpa_obj_fn)(void *);
+typedef struct tpa_obj_list tpa_obj_list;
+struct tpa_obj_list {
+    tpa_rc_t rc;
+    int64_t len;
+    int64_t cap;
+    void **d;
+    tpa_obj_fn ret;
+    tpa_obj_fn rel;
+    void (*free_self)(tpa_obj_list *l);     /* frees the list object once its items are gone: plain, or (a list of a
+                                             * cyclic-capable class, tp_aot_gc.h) untracked first */
+};
+
+static void tpa_obj_list__free_plain(tpa_obj_list *l)
+{
+    free(l);
+}
+
+/* A list object's fields once it is allocated (the items NULL, `n` slots). */
+static TPA_UNUSED int tpa_obj_list__init(tpa_obj_list *l, int64_t n, tpa_obj_fn ret, tpa_obj_fn rel)
+{
+    if (n > 0) {
+        if ((uint64_t)n > (uint64_t)(SIZE_MAX / sizeof(void *))) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+        l->d = (void **)calloc((size_t)n, sizeof(void *));
+        if (l->d == NULL) {
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->rc = 1;
+    l->len = n > 0 ? n : 0;
+    l->cap = l->len;
+    l->ret = ret;
+    l->rel = rel;
+    l->free_self = tpa_obj_list__free_plain;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list__resize(tpa_obj_list *l, int64_t n)
+{
+    uint64_t want;
+    void **d;
+    if (TPA__RESIZE_IN_PLACE && l->cap >= n && n >= (l->cap >> 1)) {
+        l->len = n;
+        return 0;
+    }
+    want = ((uint64_t)n + ((uint64_t)n >> 3) + 6u) & ~(uint64_t)3;
+    if ((uint64_t)(n - l->len) > want - (uint64_t)n) {
+        want = ((uint64_t)n + 3u) & ~(uint64_t)3;
+    }
+    if (n == 0) {
+        want = 0;
+    }
+    if (want > (uint64_t)(SIZE_MAX / sizeof(void *)) || want > (uint64_t)INT64_MAX) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (want == 0) {
+        free(l->d);
+        d = NULL;
+    }
+    else {
+        d = (void **)tpa__list_realloc(l->d, (size_t)want * sizeof(void *),
+                                       (size_t)(l->len < n ? l->len : n) * sizeof(void *));
+        if (d == NULL) {
+            if (n < l->len) {           /* a shrink keeps the old block, which holds n items: no record */
+                l->len = n;
+                return 1;
+            }
+            return tpa_raise(TPA_MemoryError, "");
+        }
+    }
+    l->d = d;
+    l->cap = (int64_t)want;
+    l->len = n;
+    return 0;
+}
+
+/* A new list of `n` slots (NULL until the caller fills every one, before the list is seen). */
+static TPA_UNUSED int tpa_obj_list_alloc(int64_t n, tpa_obj_fn ret, tpa_obj_fn rel, tpa_obj_list **out)
+{
+    tpa_obj_list *l = (tpa_obj_list *)calloc(1, sizeof(tpa_obj_list));
+    if (l == NULL) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    if (tpa_obj_list__init(l, n, ret, rel)) {
+        free(l);
+        return -1;
+    }
+    *out = l;
+    return 0;
+}
+
+static inline TPA_UNUSED void tpa_obj_list_retain(tpa_obj_list *l)
+{
+    if (l != NULL) {
+        TPA_RC_INC(l);
+    }
+}
+
+static TPA_UNUSED void tpa_obj_list_release(tpa_obj_list *l)
+{
+    if (l != NULL && TPA_RC_DEC_IS_ZERO(l)) {
+        int64_t i, n = l->len;
+        void **d = l->d;
+        tpa_obj_fn rel = l->rel;                /* (read before the list object is freed) */
+        l->d = NULL;
+        l->len = 0;
+        /* The order is not what keeps this safe: nothing reaches a list whose count is 0, and a release runs no
+         * user code. Its effect is that a tracked list leaves the collector's list, and its block is freed, before
+         * the item releases below cascade (they may free other tracked objects and their lists). */
+        l->free_self(l);
+        for (i = 0; i < n; i++) {
+            if (d[i] != NULL) {
+                rel(d[i]);
+            }
+        }
+        free(d);
+    }
+}
+
+static inline TPA_UNUSED void tpa_obj_list_set(tpa_obj_list **slot, tpa_obj_list *v)
+{
+    tpa_obj_list_retain(v);
+    tpa_obj_list_release(*slot);
+    *slot = v;
+}
+
+/* l[i] as a new reference in `*out` (which gives up the one it held); IndexError("list index out of range") */
+static TPA_UNUSED int tpa_obj_list_get(tpa_obj_list *l, int64_t i, void **out)
+{
+    int64_t slot;
+    void *v;
+    if (tpa_slot(l->len, i, 0, &slot)) {
+        return -1;
+    }
+    v = l->d[slot];
+    l->ret(v);
+    if (*out != NULL) {
+        l->rel(*out);
+    }
+    *out = v;
+    return 0;
+}
+
+/* l[i] = v (v borrowed): the new reference is held before the old one is released */
+static TPA_UNUSED int tpa_obj_list_store(tpa_obj_list *l, int64_t i, void *v)
+{
+    int64_t slot;
+    void *old;
+    if (tpa_slot(l->len, i, 1, &slot)) {
+        return -1;
+    }
+    l->ret(v);
+    old = l->d[slot];
+    l->d[slot] = v;
+    l->rel(old);
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_append(tpa_obj_list *l, void *v)
+{
+    if (tpa_obj_list__resize(l, l->len + 1)) {
+        return -1;
+    }
+    l->ret(v);
+    l->d[l->len - 1] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_insert(tpa_obj_list *l, int64_t i, void *v)
+{
+    int64_t n = l->len;
+    if (i < 0) {
+        i += n;
+        if (i < 0) {
+            i = 0;
+        }
+    }
+    if (i > n) {
+        i = n;
+    }
+    if (tpa_obj_list__resize(l, n + 1)) {
+        return -1;
+    }
+    memmove(l->d + i + 1, l->d + i, (size_t)(n - i) * sizeof(void *));
+    l->ret(v);
+    l->d[i] = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_extend(tpa_obj_list *l, const tpa_obj_list *o)
+{
+    int64_t n = l->len, m = o->len, k;
+    if (m == 0) {
+        return 0;
+    }
+    if (tpa_obj_list__resize(l, n + m)) {
+        return -1;
+    }
+    for (k = 0; k < m; k++) {
+        l->ret(o->d[k]);
+        l->d[n + k] = o->d[k];
+    }
+    return 0;
+}
+
+static TPA_UNUSED void tpa_obj_list_clear(tpa_obj_list *l)
+{
+    int64_t i, n = l->len;
+    void **d = l->d;
+    l->d = NULL;
+    l->len = 0;
+    l->cap = 0;
+    for (i = 0; i < n; i++) {
+        l->rel(d[i]);
+    }
+    free(d);
+}
+
+static TPA_UNUSED void tpa_obj_list_reverse(tpa_obj_list *l)
+{
+    int64_t i, j;
+    for (i = 0, j = l->len - 1; i < j; i++, j--) {
+        void *t = l->d[i];
+        l->d[i] = l->d[j];
+        l->d[j] = t;
+    }
+}
+
+/* pop: the item's reference moves to `*out` (which gives up the one it held) */
+static TPA_UNUSED int tpa_obj_list_pop(tpa_obj_list *l, int has_index, int64_t i, void **out)
+{
+    int64_t n = l->len;
+    void *v;
+    if (n == 0) {
+        return tpa_raise(TPA_IndexError, "pop from empty list");
+    }
+    if (!has_index) {
+        i = n - 1;
+    }
+    if (i < 0) {
+        i += n;
+    }
+    if (i < 0 || i >= n) {
+        return tpa_raise(TPA_IndexError, "pop index out of range");
+    }
+    v = l->d[i];
+    memmove(l->d + i, l->d + i + 1, (size_t)(n - i - 1) * sizeof(void *));
+    if (tpa_obj_list__resize(l, n - 1)) {
+        l->len = n - 1;
+    }
+    if (*out != NULL) {
+        l->rel(*out);
+    }
+    *out = v;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_obj_list_contains(const tpa_obj_list *l, const void *v)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* list.index(v) by identity (the class has no __eq__, which the frontend checks); CPython 3.14 and later do not format
+ * the value in the message, so no repr (with its address) is needed. */
+static TPA_UNUSED int tpa_obj_list_index(const tpa_obj_list *l, const void *v, int64_t *out)
+{
+    int64_t i;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            *out = i;
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.index(x): x not in list");
+}
+
+static TPA_UNUSED int64_t tpa_obj_list_count(const tpa_obj_list *l, const void *v)
+{
+    int64_t i, k = 0;
+    for (i = 0; i < l->len; i++) {
+        k += l->d[i] == v;
+    }
+    return k;
+}
+
+static TPA_UNUSED int tpa_obj_list_remove(tpa_obj_list *l, const void *v)
+{
+    int64_t i;
+    void *got = NULL;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            tpa_obj_list_pop(l, 1, i, &got);
+            l->rel(got);
+            return 0;
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.remove(x): x not in list");
+}
+
+#define TPA__OBJ_RET(x) l->ret(x)
+#define TPA__OBJ_REL(x) l->rel(x)
+TPA__DEF_LIST_SPLICE(tpa_obj_list_, tpa_obj_list, void *, TPA__OBJ_RET, TPA__OBJ_REL, tpa_obj_list__resize)
+
+/* Tier S2a: the outcome of a list comparison (Objects/listobject.c list_richcompare) once the first differing pair,
+ * or the lengths, give `c` (<0, 0, >0); `op` 0..5 is == != < <= > >=. */
+static inline int tpa__cmp_outcome(int op, int c)
+{
+    switch (op) {
+    case 0: return c == 0;
+    case 1: return c != 0;
+    case 2: return c < 0;
+    case 3: return c <= 0;
+    case 4: return c > 0;
+    default: return c >= 0;
+    }
+}
+
+/* a op b of two raw int lists: the first index where the items differ decides; with none, the lengths. */
+static inline TPA_UNUSED int tpa_i64_cmp(const tpa_i64_list *a, const tpa_i64_list *b, int op)
+{
+    int64_t i, n = a->len < b->len ? a->len : b->len;
+    for (i = 0; i < n; i++) {
+        if (a->d[i] != b->d[i]) {
+            if (op <= 1) {
+                return op == 1;
+            }
+            return tpa__cmp_outcome(op, a->d[i] < b->d[i] ? -1 : 1);
+        }
+    }
+    return tpa__cmp_outcome(op, a->len < b->len ? -1 : a->len > b->len ? 1 : 0);
+}
+
+#if defined(TPA_GROW_I64)
+/* list.remove(v): the first equal item, else ValueError("list.remove(x): x not in list") */
+static inline TPA_UNUSED int tpa_i64_remove(tpa_i64_list *l, int64_t v)
+{
+    int64_t i, dummy;
+    for (i = 0; i < l->len; i++) {
+        if (l->d[i] == v) {
+            return tpa_i64_pop(l, 1, i, &dummy);
+        }
+    }
+    return tpa_raise(TPA_ValueError, "list.remove(x): x not in list");
+}
+#endif
 
 /* `list(range(n))`: 0 .. n-1 (an empty list for n <= 0) */
 static inline int tpa_i64_iota(int64_t n, tpa_i64_list **out)
@@ -991,32 +2880,680 @@ static inline void tpa_print_str(const char *s, size_t n)
     fwrite(s, 1, n, stdout);
 }
 
-/* format(x, '.<prec>f') of a float: nan and the infinities as CPython writes them (never `-nan`), the
- * rest through printf("%.*f"), whose result is the correctly rounded decimal expansion on glibc, musl, the
- * Apple C library and UCRT (the same digits as CPython's own conversion; the dependence on the C
- * library's exact rounding is issue #450, which the differential tests exercise on every target). */
-static inline void tpa_print_f64_fixed(double v, int prec)
+/* format(x, '.<prec>f') of a float (issue #450): exact round-half-to-even from the IEEE-754 bits
+ * with no dependence on the C library's printf rounding. `buf` must hold at least 320 + prec bytes
+ * (valid for 0 <= prec <= 300; the AOT compiler caps prec at AOT_MAX_PRECISION = 20). */
+static inline int tpa_format_f64_fixed(double v, int prec, char *buf)
 {
-    char buf[400];
-    int n;
-    if (v != v) {
-        fwrite("nan", 1, 3, stdout);
-        return;
+    uint64_t bits, mant, m;
+    int sign, bexp, e2, n = 0;
+    if (prec < 0) {
+        prec = 0;
     }
-    if (v == HUGE_VAL || v == -HUGE_VAL) {
-        if (v > 0) {
-            fwrite("inf", 1, 3, stdout);
+    memcpy(&bits, &v, sizeof bits);
+    sign = (int)(bits >> 63);
+    bexp = (int)((bits >> 52) & 0x7FFU);
+    mant = bits & ((UINT64_C(1) << 52) - 1U);
+
+    if (bexp == 0x7FF) {
+        if (mant != 0) {
+            memcpy(buf, "nan", 4);
+            return 3;
+        }
+        if (sign) {
+            memcpy(buf, "-inf", 5);
+            return 4;
+        }
+        memcpy(buf, "inf", 4);
+        return 3;
+    }
+    if (sign) {
+        buf[n++] = '-';
+    }
+    if (bexp == 0 && mant == 0) {
+        buf[n++] = '0';
+        if (prec > 0) {
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
+    }
+    if (bexp > 0) {
+        m = (UINT64_C(1) << 52) | mant;
+        e2 = bexp - 1075;
+    }
+    else {
+        m = mant;
+        e2 = -1074;
+    }
+    if (e2 >= 0) {
+        tpa__f64_bu val;
+        tpa__f64_bu_from_u64(&val, m);
+        tpa__f64_bu_shl(&val, e2);
+        n += tpa__f64_bu_to_dec(&val, buf + n);
+        if (prec > 0) {
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
+    }
+    {
+        int s_exp = e2 + prec;
+        tpa__f64_bu val;
+        char digs[360];
+        int ndig;
+        if (s_exp >= 0) {
+            tpa__f64_bu_from_u64(&val, m);
+            tpa__f64_bu_mul_pow5(&val, prec);
+            tpa__f64_bu_shl(&val, s_exp);
         }
         else {
-            fwrite("-inf", 1, 4, stdout);
+            int shift = -s_exp;
+            if (shift > 54 + 3 * prec) {
+                val.n = 0;
+            }
+            else {
+                tpa__f64_bu_from_u64(&val, m);
+                tpa__f64_bu_mul_pow5(&val, prec);
+                tpa__f64_bu_shr_round_even(&val, shift);
+            }
         }
-        return;
+        ndig = tpa__f64_bu_to_dec(&val, digs);
+        if (prec == 0) {
+            memcpy(buf + n, digs, (size_t)ndig);
+            n += ndig;
+        }
+        else if (ndig <= prec) {
+            buf[n++] = '0';
+            buf[n++] = '.';
+            memset(buf + n, '0', (size_t)(prec - ndig));
+            n += prec - ndig;
+            memcpy(buf + n, digs, (size_t)ndig);
+            n += ndig;
+        }
+        else {
+            int ip = ndig - prec;
+            memcpy(buf + n, digs, (size_t)ip);
+            n += ip;
+            buf[n++] = '.';
+            memcpy(buf + n, digs + ip, (size_t)prec);
+            n += prec;
+        }
+        buf[n] = '\0';
+        return n;
     }
-    n = snprintf(buf, sizeof buf, "%.*f", prec, v);
+}
+
+static inline void tpa_print_f64_fixed(double v, int prec)
+{
+    char stack_buf[400];
+    char *buf = stack_buf;
+    int n;
+    if (prec < 0) {
+        prec = 0;
+    }
+    if (prec > 60) {
+        buf = (char *)malloc((size_t)prec + 320U);
+        if (buf == NULL) {
+            return;
+        }
+    }
+    n = tpa_format_f64_fixed(v, prec, buf);
     fwrite(buf, 1, (size_t)n, stdout);
+    if (buf != stack_buf) {
+        free(buf);
+    }
 }
 
 static inline void tpa_print_sep(void) { fputc(' ', stdout); }
 static inline void tpa_print_end(void) { fputc('\n', stdout); }
+
+/* ------------------------------------------------------------------------------------------
+ * Integer shifts (RAW int64_t), float power, additional math, time, and sys.exit (Tier K PR5)
+ * ------------------------------------------------------------------------------------------ */
+
+static inline int tpa_rshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        tpa_raise(TPA_ValueError, "negative shift count");
+        return -1;
+    }
+    if (b >= 64) {
+        *out = (a < 0) ? -1 : 0;
+        return 0;
+    }
+    if (a >= 0) {
+        *out = (int64_t)((uint64_t)a >> (unsigned)b);
+    }
+    else {
+        *out = (int64_t)(~((~(uint64_t)a) >> (unsigned)b));
+    }
+    return 0;
+}
+
+static inline int tpa_plshift_i64(int64_t a, int64_t b, int64_t *out)
+{
+    if (b < 0) {
+        tpa_raise(TPA_ValueError, "negative shift count");
+        return -1;
+    }
+    if (b >= 64) {
+        *out = 0;
+        return 0;
+    }
+    *out = (int64_t)((uint64_t)a << (unsigned)b);
+    return 0;
+}
+
+static inline int tpa__f64_is_odd_integer(double x)
+{
+    return isfinite(x) && floor(x) == x && fmod(fabs(x), 2.0) == 1.0;
+}
+
+/* CPython Objects/floatobject.c float_pow semantics (float ** float). */
+static inline int tpa_pow_f64(double iv, double iw, double *out)
+{
+    double r;
+    int negate_result = 0;
+    if (iw == 0.0) {
+        *out = 1.0;
+        return 0;
+    }
+    if (isnan(iv) || isnan(iw)) {
+        *out = (iv == 1.0) ? 1.0 : NAN;
+        return 0;
+    }
+    if (isinf(iw)) {
+        iv = fabs(iv);
+        if (iv == 1.0) {
+            *out = 1.0;
+            return 0;
+        }
+        else if ((iw > 0.0) == (iv > 1.0)) {
+            *out = fabs(iw);
+            return 0;
+        }
+        else {
+            *out = 0.0;
+            return 0;
+        }
+    }
+    if (isinf(iv)) {
+        int odd = tpa__f64_is_odd_integer(iw);
+        if (iw > 0.0) {
+            *out = odd ? iv : fabs(iv);
+        }
+        else {
+            *out = odd ? copysign(0.0, iv) : 0.0;
+        }
+        return 0;
+    }
+    if (iv == 0.0) {
+        if (iw < 0.0) {
+            tpa_raise(TPA_ZeroDivisionError, "zero to a negative power");
+            return -1;
+        }
+        *out = tpa__f64_is_odd_integer(iw) ? iv : 0.0;
+        return 0;
+    }
+    if (iv < 0.0) {
+        if (iw != floor(iw)) {
+            tpa_raise(TPA_ValueError, "negative number cannot be raised to a fractional power");
+            return -1;
+        }
+        iv = -iv;
+        negate_result = tpa__f64_is_odd_integer(iw);
+    }
+    errno = 0;
+    r = pow(iv, iw);
+    if (errno == ERANGE && isinf(r)) {
+        tpa_raise(TPA_OverflowError, "(34, 'Numerical result out of range')");
+        return -1;
+    }
+    if (isinf(r)) {
+        tpa_raise(TPA_OverflowError, "(34, 'Numerical result out of range')");
+        return -1;
+    }
+    *out = negate_result ? -r : r;
+    return 0;
+}
+
+#define TPA_MATH_MSG_UNIT "expected a number in range from -1 up to 1, got "
+
+static inline double tpa__m_log2(double x)
+{
+    if (isfinite(x)) {
+        if (x > 0.0) return log2(x);
+        errno = EDOM;
+        if (x == 0.0) return -HUGE_VAL;
+        return NAN;
+    }
+    else if (isnan(x)) return x;
+    else if (x > 0.0) return x;
+    errno = EDOM;
+    return NAN;
+}
+
+static inline double tpa__m_log10(double x)
+{
+    if (isfinite(x)) {
+        if (x > 0.0) return log10(x);
+        errno = EDOM;
+        if (x == 0.0) return -HUGE_VAL;
+        return NAN;
+    }
+    else if (isnan(x)) return x;
+    else if (x > 0.0) return x;
+    errno = EDOM;
+    return NAN;
+}
+
+#define TPA__DEF_MATH1_K5(NAME, CALL, CAN_OVERFLOW, MSG)                                       \
+    static inline int tpa_math_##NAME(double x, double *out)                                   \
+    {                                                                                          \
+        double r;                                                                              \
+        errno = 0;                                                                             \
+        r = CALL;                                                                              \
+        return tpa__math_1_finish(x, r, CAN_OVERFLOW, MSG, out);                               \
+    }
+TPA__DEF_MATH1_K5(log2, tpa__m_log2(x), 0, TPA_MATH_MSG_POSITIVE)
+TPA__DEF_MATH1_K5(log10, tpa__m_log10(x), 0, TPA_MATH_MSG_POSITIVE)
+TPA__DEF_MATH1_K5(asin, asin(x), 0, TPA_MATH_MSG_UNIT)
+TPA__DEF_MATH1_K5(acos, acos(x), 0, TPA_MATH_MSG_UNIT)
+TPA__DEF_MATH1_K5(atan, atan(x), 0, NULL)
+TPA__DEF_MATH1_K5(sinh, sinh(x), 1, NULL)
+TPA__DEF_MATH1_K5(cosh, cosh(x), 1, NULL)
+TPA__DEF_MATH1_K5(tanh, tanh(x), 0, NULL)
+#undef TPA__DEF_MATH1_K5
+
+static inline int tpa_math_pow(double x, double y, double *out)
+{
+    double r;
+    if (y == 0.0 || x == 1.0) {
+        *out = 1.0;
+        return 0;
+    }
+    if (isnan(x) || isnan(y)) {
+        *out = NAN;
+        return 0;
+    }
+    if (x == 0.0 && y < 0.0) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isfinite(x) && x < 0.0 && isfinite(y) && floor(y) != y) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    errno = 0;
+    r = pow(x, y);
+    if (isnan(r) && !isnan(x) && !isnan(y)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isinf(r) && isfinite(x) && isfinite(y)) {
+        tpa_raise(TPA_OverflowError, "math range error");
+        return -1;
+    }
+    if (isfinite(r) && errno && tpa__math_is_error(r)) {
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+static inline int tpa_math_copysign(double x, double y, double *out)
+{
+    *out = copysign(x, y);
+    return 0;
+}
+
+static inline int tpa_math_fmod(double x, double y, double *out)
+{
+    double r;
+    if (isnan(x) || isnan(y)) {
+        *out = NAN;
+        return 0;
+    }
+    if (y == 0.0 || isinf(x)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    if (isinf(y)) {
+        *out = x;
+        return 0;
+    }
+    errno = 0;
+    r = fmod(x, y);
+    if (isnan(r)) {
+        tpa_raise(TPA_ValueError, "math domain error");
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+static inline int tpa_math_isnan(double x) { return isnan(x) ? 1 : 0; }
+static inline int tpa_math_isinf(double x) { return isinf(x) ? 1 : 0; }
+static inline int tpa_math_isfinite(double x) { return isfinite(x) ? 1 : 0; }
+
+/* Portable time helpers */
+static inline double tpa_time_perf_counter(void)
+{
+#if defined(_WIN32)
+    LARGE_INTEGER freq, counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static inline double tpa_time_monotonic(void)
+{
+#if defined(_WIN32)
+    return (double)GetTickCount64() * 1e-3;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static inline double tpa_time_time(void)
+{
+#if defined(_WIN32)
+    FILETIME ft;
+    ULARGE_INTEGER uli;
+    GetSystemTimeAsFileTime(&ft);
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return (double)(uli.QuadPart - 116444736000000000ULL) * 1e-7;
+#elif defined(CLOCK_REALTIME)
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)time(NULL);
+#endif
+}
+
+static inline int tpa_time_sleep(double secs)
+{
+    if (isnan(secs) || secs < 0.0) {
+        tpa_raise(TPA_ValueError, "sleep length must be non-negative");
+        return -1;
+    }
+    if (secs == 0.0) {
+        return 0;
+    }
+#if defined(_WIN32)
+    {
+        double ms = secs * 1000.0;
+        DWORD d = (ms >= (double)0xFFFFFFFEu) ? (DWORD)0xFFFFFFFEu : (DWORD)ms;
+        Sleep(d);
+    }
+#else
+    {
+        struct timespec req, rem;
+        req.tv_sec = (time_t)secs;
+        req.tv_nsec = (long)((secs - (double)req.tv_sec) * 1e9);
+        if (req.tv_nsec < 0) req.tv_nsec = 0;
+        if (req.tv_nsec >= 1000000000L) {
+            req.tv_sec += 1;
+            req.tv_nsec -= 1000000000L;
+        }
+        while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+            req = rem;
+        }
+    }
+#endif
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * Scope regions (SPEC N-17, N-12b/c step 2, design 6.3.2 item 2; agent proposal, not owner-confirmed).
+ * A region is a list of bump-allocated chunks owned by one C local of a generated function: the
+ * function's body, or one iteration of one of its loops, owns it. The objects in it (`struct
+ * tpa_reg_<F>__<C>`, no reference count) are freed together, at the function's one cleanup point, or
+ * released and reset at the top of every iteration. One region holds objects of ONE type (the generated
+ * code gives each (function, class) its own region), so the generated per-class walk that releases the
+ * owned heap references the objects hold (lists, big ints, heap-rc objects) steps through a chunk in
+ * units of that type's size: `used` is an exact multiple of it. A chunk's data starts 16-byte aligned
+ * (the header is 32 bytes on a 64-bit target and malloc's result is at least 16-byte aligned), and
+ * sizeof(T) is a multiple of alignof(T), so every object is aligned. An allocation is zeroed, so a field
+ * the generated constructor did not reach (its argument conversion failed) releases as nothing: a NULL
+ * list or object; big-int fields are set to TPA_INT_ZERO by the constructor before anything can fail
+ * (the word 0 is not a tpa_int value). A failed chunk allocation raises MemoryError and returns NULL;
+ * the generated site leaves through `tp_cleanup:`, which frees the region.
+ * ------------------------------------------------------------------------------------------ */
+#define TPA_REGION_FIRST_CHUNK ((size_t)4096)          /* bytes of objects in the first chunk */
+#define TPA_REGION_MAX_CHUNK ((size_t)1 << 20)         /* each later chunk doubles, up to this */
+
+typedef struct tpa_region_chunk {
+    struct tpa_region_chunk *next;      /* the previous chunk (the head is the newest) */
+    size_t cap;
+    size_t used;
+    size_t pad_;                        /* keeps the header at 32 bytes: the objects start 16-byte aligned */
+} tpa_region_chunk;
+
+typedef struct tpa_region {
+    tpa_region_chunk *head;
+} tpa_region;
+
+#define TPA_REGION_INIT { NULL }
+
+static inline void *tpa_region_alloc(tpa_region *r, size_t size)
+{
+    tpa_region_chunk *c = r->head;
+    char *p;
+    if (c == NULL || c->cap - c->used < size) {
+        size_t cap = c == NULL ? TPA_REGION_FIRST_CHUNK : (c->cap < TPA_REGION_MAX_CHUNK ? c->cap * 2 : c->cap);
+        tpa_region_chunk *n;
+        if (cap < size) {
+            cap = size;
+        }
+        n = (tpa_region_chunk *)malloc(sizeof(tpa_region_chunk) + cap);
+        if (n == NULL) {
+            tpa_raise(TPA_MemoryError, "");
+            return NULL;
+        }
+        n->next = c;
+        n->cap = cap;
+        n->used = 0;
+        n->pad_ = 0;
+        r->head = n;
+        c = n;
+    }
+    p = (char *)(c + 1) + c->used;
+    c->used += size;
+    memset(p, 0, size);
+    return p;
+}
+
+/* Every chunk freed; the region is empty again (a function frees each of its regions once, at its cleanup point). */
+static inline void tpa_region_free(tpa_region *r)
+{
+    tpa_region_chunk *c = r->head;
+    while (c != NULL) {
+        tpa_region_chunk *next = c->next;
+        free(c);
+        c = next;
+    }
+    r->head = NULL;
+}
+
+/* The start of an iteration: the newest (largest) chunk is kept and emptied, the older ones are freed, so a
+ * loop whose iterations allocate the same amount reuses one chunk and calls malloc no more. */
+static inline void tpa_region_reset(tpa_region *r)
+{
+    tpa_region_chunk *c = r->head;
+    if (c == NULL) {
+        return;
+    }
+    tpa_region_free(&(tpa_region){ c->next });
+    c->next = NULL;
+    c->used = 0;
+}
+
+/* Deferred frees of the generated class releases (review of #508, F1; CPython's trashcan has the same job). A
+ * release that frees an object releases its fields, and a field of a class type is released by a call: a chain of
+ * n objects through a field that is not the release loop's tail field recursed n deep and overflowed the C stack
+ * (a 500k-node chain). Every release of a class that has a field of a class type now counts its nesting depth:
+ * below TPA_TRASH_LIMIT it frees at once, exactly as before; at the limit it parks the object (its count already
+ * zero, already untracked) with the class's drop function on a thread-local list, and the outermost release
+ * drains the list when its depth returns to zero, each drop starting again from depth 1. So no release nests more
+ * than TPA_TRASH_LIMIT deep, whatever the shape of the chain or the classes it alternates between. Only the order
+ * of frees changes, beyond the limit; AOT compiles no `__del__` and a freed object is unreachable, so the order is
+ * not observable. When the list cannot grow (out of memory) the object is freed at once, as before. */
+#ifndef TPA_TRASH_LIMIT
+#define TPA_TRASH_LIMIT 1000
+#endif
+
+typedef void (*tpa_trash_fn)(void *obj);
+
+typedef struct tpa_trash_item {
+    void *obj;
+    tpa_trash_fn drop;
+} tpa_trash_item;
+
+typedef struct tpa_trash_state {
+    int64_t depth;                  /* releases of trash-aware classes in flight on this thread */
+    tpa_trash_item *items;          /* parked objects, LIFO */
+    size_t len;
+    size_t cap;
+#if defined(TPA_TRASH_STATS)
+    int64_t max_depth;              /* tests only: the deepest nesting reached, and the objects parked */
+    int64_t parked;
+    int registered;
+#endif
+} tpa_trash_state;
+
+#if defined(TPA_THREADS)
+static TPA_THREAD_LOCAL tpa_trash_state tpa_trash;
+#else
+static tpa_trash_state tpa_trash;
+#endif
+
+#if defined(TPA_TRASH_STATS)
+/* Tests only (-DTPA_TRASH_STATS): the nesting the bound allowed, printed at exit, so a test checks the depth itself
+ * instead of relying on a stack overflow, whose size differs between platforms (review of #513's first CI run). */
+static void tpa_trash__report(void)
+{
+    fflush(stdout);
+    fprintf(stderr, "tpa_trash: max_depth=%lld parked=%lld\n", (long long)tpa_trash.max_depth,
+            (long long)tpa_trash.parked);
+    fflush(stderr);
+}
+#endif
+
+/* Called by a release once the count reached zero: 1 to free now (the caller frees the fields and the object,
+ * then calls tpa_trash_leave), 0 when the object was parked (the caller returns at once). */
+static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop) TPA_UNUSED;
+static inline int tpa_trash_enter(void *obj, tpa_trash_fn drop)
+{
+    tpa_trash_state *t = &tpa_trash;
+#if defined(TPA_TRASH_STATS)
+    if (!t->registered) {
+        t->registered = 1;
+        atexit(tpa_trash__report);
+    }
+#endif
+    if (t->depth >= TPA_TRASH_LIMIT) {
+        if (t->len == t->cap) {
+            size_t cap = t->cap != 0 ? t->cap * 2 : 64;
+            tpa_trash_item *items = (tpa_trash_item *)realloc(t->items, cap * sizeof *items);
+            if (items != NULL) {
+                t->items = items;
+                t->cap = cap;
+            }
+        }
+        if (t->len < t->cap) {
+            t->items[t->len].obj = obj;
+            t->items[t->len].drop = drop;
+            t->len += 1;
+#if defined(TPA_TRASH_STATS)
+            t->parked += 1;
+#endif
+            return 0;
+        }
+    }
+    t->depth += 1;
+#if defined(TPA_TRASH_STATS)
+    if (t->depth > t->max_depth) {
+        t->max_depth = t->depth;
+    }
+#endif
+    return 1;
+}
+
+static void tpa_trash__drain(tpa_trash_state *t) TPA_UNUSED;
+static void tpa_trash__drain(tpa_trash_state *t)
+{
+    t->depth = 1;                   /* a drop's own releases nest from here; none of them drains again */
+    while (t->len > 0) {
+        tpa_trash_item it = t->items[--t->len];
+        it.drop(it.obj);
+    }
+    t->depth = 0;
+    free(t->items);
+    t->items = NULL;
+    t->cap = 0;
+}
+
+static inline void tpa_trash_leave(void) TPA_UNUSED;
+static inline void tpa_trash_leave(void)
+{
+    tpa_trash_state *t = &tpa_trash;
+    t->depth -= 1;
+    if (t->depth == 0 && t->len > 0) {
+        tpa_trash__drain(t);
+    }
+}
+
+/* The objects of a region of one type: `TPA_REGION_FOREACH(T, obj, region) { ... }` runs the statement for every
+ * object the region holds, in allocation order inside a chunk (the chunks newest first). The generated
+ * `tpa_reg_<F>__<C>_drop` uses it to release the owned heap references of every object before a free or a reset. */
+#define TPA_REGION_FOREACH(T, obj, region)                                                       \
+    for (tpa_region_chunk *tpa__c = (region)->head; tpa__c != NULL; tpa__c = tpa__c->next)        \
+        for (size_t tpa__off = 0; tpa__off + sizeof(T) <= tpa__c->used; tpa__off += sizeof(T))   \
+            for (T *obj = (T *)((char *)(tpa__c + 1) + tpa__off); obj != NULL; obj = NULL)
+
+#if !defined(TPA_LIBRARY)
+/* Run once by `sys.exit` before `exit()` (REVIEW-503 note 2): the generated `main` sets it to `tpa_gc_exit` when
+ * the program links the cycle collector, so the cycles alive at `sys.exit` are collected as they are when
+ * `__main__` returns (CPython collects at shutdown on both paths). NULL in every other program. Read and
+ * cleared without synchronisation: `sys.exit` runs only on the main thread today (AOT has no parallel loops and
+ * the library build refuses `sys.exit`; review of #508, F4). */
+static void (*tpa_exit_hook)(void);
+
+static inline void tpa_exit_status(int status)
+{
+    void (*hook)(void) = tpa_exit_hook;
+    tpa_exit_hook = NULL;
+    if (hook != NULL) {
+        hook();
+    }
+    fflush(stdout);
+    fflush(stderr);
+    exit(status);
+}
+
+static inline void tpa_exit_i64(int64_t code)
+{
+    tpa_exit_status((int)(code & 0xff));
+}
+#endif
 
 #endif

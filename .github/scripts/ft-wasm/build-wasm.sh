@@ -6,8 +6,8 @@
 # Environment:
 #   FT_WORK                  scratch directory (default .tmp/ft-wasm)
 #   FT_OUT                   receives the archive the workflow uploads (default .tmp/ft-wasm-out)
-#   FT_WASM_EMSDK_VERSION    Emscripten to install; empty = the version CPython itself pins
-#                            (Platforms/emscripten/config.toml, 4.0.19 in 3.15.0)
+#   FT_WASM_EMSDK_VERSION    Emscripten to install; empty = 5.0.3 (DEFAULT_EMSDK_VERSION below),
+#                            not the 4.0.19 CPython 3.15.0 pins in Platforms/emscripten/config.toml
 #   FT_WASM_TRAMPOLINE_PATCH apply (default) | skip; see patch_trampoline below
 #
 # Needs: a C toolchain for the native build Python, git, curl, node on PATH
@@ -16,10 +16,13 @@
 # This is a separate script, not a mode of python-multiplatform/scripts/wasm/build-cpython.sh:
 # that script is pinned to CPython 3.14.2 / Emscripten 5.0.3 / pyemscripten_2026_0, clones a
 # pinned git commit, writes into .caches/ and stages the runtime the wasmJs suite runs against.
-# This job builds a different CPython (3.15.0 tarball) with a different Emscripten and must not
-# touch that runtime. The flags below are the #175 investigation's proposal, not a decision.
+# This job builds a different CPython (3.15.0 tarball) and must not touch that runtime. Both use
+# Emscripten 5.0.3. The flags below are the #175 investigation's proposal, not a decision.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# _pm_upcall.c, smoke.py and embed-probe.mjs live beside build-cpython.sh, which builds the same
+# runtime for the library (Decision 10 a1); this script is deleted once wasm.yml is green on it.
+wasm_scripts="$(cd "$here/../../../python-multiplatform/scripts/wasm" && pwd)"
 
 export FT_WORK="${FT_WORK:-$PWD/.tmp/ft-wasm}"
 export FT_OUT="${FT_OUT:-$PWD/.tmp/ft-wasm-out}"
@@ -57,7 +60,12 @@ cd "$src"
 # activated environment ("Build will use EMSDK from current environment").
 pinned="$(sed -n 's/^emscripten-version = "\(.*\)"$/\1/p' Platforms/emscripten/config.toml)"
 [ -n "$pinned" ] || die "no emscripten-version in Platforms/emscripten/config.toml"
-EMSDK_VERSION="${FT_WASM_EMSDK_VERSION:-$pinned}"
+# The default is 5.0.3, the version pyemscripten_2026_0 pins and build-cpython.sh uses, so PMP's
+# wasm runtime and pypackpack #82's wheels share one Emscripten. Leader 2026-11-26, Decision 10 (b) b1 in the team report pmp-binder.md: "b1 approved (one Emscripten 5.0.3 for PMP wasm and pypackpack #82)".
+# Evidence: build-ft-wasm run 45623531263 (5274e9e2) on 5.0.3, green: smoke OK in both layouts,
+# embedding probe a to d OK. CPython's own pin is still logged, so a divergence stays visible.
+DEFAULT_EMSDK_VERSION=5.0.3
+EMSDK_VERSION="${FT_WASM_EMSDK_VERSION:-$DEFAULT_EMSDK_VERSION}"
 log "Emscripten pinned by CPython $PY_VERSION: $pinned; using: $EMSDK_VERSION"
 emsdk="$FT_WORK/emsdk"
 if [ ! -x "$emsdk/emsdk" ]; then
@@ -162,51 +170,67 @@ log "ok: host configured with --disable-gil --enable-wasm-pthreads, ABIFLAGS=t"
 # unverified, so _malloc,_free,_Py_Version are appended to that list when it exists (harmless if
 # MAIN_MODULE already exports everything); the probe then checks the exports it needs and
 # fails loudly if one is missing.
+# Both Makefile and Makefile.pre are patched: adding Modules/Setup.local (below) makes make
+# re-run makesetup, which regenerates Makefile from Makefile.pre, so a patch of Makefile alone
+# is silently dropped (pmp17: the probe found Module.wasmMemory undefined). The linked
+# python.mjs is checked after make-host.
 patch_makefile_exports() {
-    python3 - "$hostdir/Makefile" <<'PATCH'
+    python3 - "$hostdir/Makefile" "$hostdir/Makefile.pre" <<'PATCH'
 import re
 import sys
 from pathlib import Path
-p = Path(sys.argv[1]); t = p.read_text()
 
-def add_runtime_methods(m):
-    items = m.group(2).split(",")
-    for extra in ("wasmExports", "wasmMemory", "wasmTable"):
-        if extra not in items:
-            items.append(extra)
-    return m.group(1) + ",".join(items)
+RUNTIME = ("wasmExports", "wasmMemory", "wasmTable")
+FUNCTIONS = ("_malloc", "_free", "_Py_Version")
 
-t, n = re.subn(r"(-sEXPORTED_RUNTIME_METHODS=)(\S+)", add_runtime_methods, t)
-assert n >= 1, "no -sEXPORTED_RUNTIME_METHODS= in the host Makefile; the link line changed shape, re-check the patch"
-for m in re.finditer(r"-sEXPORTED_RUNTIME_METHODS=(\S+)", t):
-    methods = m.group(1).split(",")
-    assert all(x in methods for x in ("wasmExports", "wasmMemory", "wasmTable")), "wasmExports/wasmMemory/wasmTable missing after the patch: " + m.group(0)
-print(f"Makefile: wasmExports,wasmMemory,wasmTable added to {n} -sEXPORTED_RUNTIME_METHODS list(s)")
+def add_names(extras):
+    def sub(m):
+        items = m.group(2).split(",")
+        items += [x for x in extras if x not in items]
+        return m.group(1) + ",".join(items)
+    return sub
 
-def add_functions(m):
-    items = m.group(2).split(",")
-    for extra in ("_malloc", "_free", "_Py_Version"):
-        if extra not in items:
-            items.append(extra)
-    return m.group(1) + ",".join(items)
-
-t, k = re.subn(r"(-sEXPORTED_FUNCTIONS=)(\S+)", add_functions, t)
-if k:
-    print(f"Makefile: _malloc,_free,_Py_Version ensured in {k} -sEXPORTED_FUNCTIONS list(s)")
-else:
-    print("Makefile: NOTE no -sEXPORTED_FUNCTIONS= found; relying on the link exporting C symbols another way (the probe checks)")
-p.write_text(t)
-for line in t.splitlines():
-    if "-sEXPORTED_RUNTIME_METHODS" in line or "-sEXPORTED_FUNCTIONS" in line or "-sMAIN_MODULE" in line:
-        print("Makefile link line:", line.strip()[:2000])
+for arg in sys.argv[1:]:
+    p = Path(arg); t = p.read_text()
+    t, n = re.subn(r"(-sEXPORTED_RUNTIME_METHODS=)(\S+)", add_names(RUNTIME), t)
+    assert n >= 1, f"no -sEXPORTED_RUNTIME_METHODS= in {p.name}; the link line changed shape, re-check the patch"
+    for m in re.finditer(r"-sEXPORTED_RUNTIME_METHODS=(\S+)", t):
+        assert all(x in m.group(1).split(",") for x in RUNTIME), f"{p.name}: {RUNTIME} missing after the patch: " + m.group(0)
+    print(f"{p.name}: wasmExports,wasmMemory,wasmTable added to {n} -sEXPORTED_RUNTIME_METHODS list(s)")
+    t, k = re.subn(r"(-sEXPORTED_FUNCTIONS=)(\S+)", add_names(FUNCTIONS), t)
+    if k:
+        print(f"{p.name}: _malloc,_free,_Py_Version ensured in {k} -sEXPORTED_FUNCTIONS list(s)")
+    else:
+        print(f"{p.name}: NOTE no -sEXPORTED_FUNCTIONS= found; relying on the link exporting C symbols another way (the probe checks)")
+    p.write_text(t)
+    for line in t.splitlines():
+        if "-sEXPORTED_RUNTIME_METHODS" in line or "-sEXPORTED_FUNCTIONS" in line or "-sMAIN_MODULE" in line:
+            print(f"{p.name} link line:", line.strip()[:2000])
 PATCH
 }
 patch_makefile_exports
+
+# ---- built-in module: upcalls from Python threads (#175 step 2) -----------
+# _pm_upcall.c (next to this script) routes a call made on a pthread to the main runtime
+# thread, where Kotlin/Wasm runs; see its header and docs/platforms/free-threaded-wasm.md.
+# Built in statically through the build tree's Modules/Setup.local (configure leaves an empty
+# one there; makesetup reads it and finds the source under $(srcdir)/Modules). Its exported
+# functions (EMSCRIPTEN_KEEPALIVE) are checked below; smoke.py tests the routing.
+cp "$wasm_scripts/_pm_upcall.c" Modules/_pm_upcall.c
+printf '*static*\n_pm_upcall _pm_upcall.c\n' >> "$hostdir/Modules/Setup.local"
+log "Setup.local: $(tr '\n' ' ' < "$hostdir/Modules/Setup.local")"
 
 # ---- host build -----------------------------------------------------------
 # make-host also runs `python.sh --version`, so a startup failure (for example the trampoline
 # instantiation above, with FT_WASM_TRAMPOLINE_PATCH=skip) fails this step.
 python3 Platforms/emscripten make-host
+# The link must really export the runtime names (Emscripten writes Module["wasmMemory"]=wasmMemory
+# only for an exported name); a patch lost to a Makefile regeneration fails here.
+for name in wasmExports wasmMemory wasmTable; do
+    grep -q "Module\[\"$name\"\]=" "$hostdir/python.mjs" \
+        || die "python.mjs does not export Module.$name (the EXPORTED_RUNTIME_METHODS patch was lost)"
+done
+log "ok: python.mjs exports Module.wasmExports, wasmMemory, wasmTable"
 
 # ---- verification ---------------------------------------------------------
 # python.wasm must use shared memory with a declared maximum.
@@ -235,12 +259,27 @@ console.log(`python.wasm memory: ${mem.where} shared=${shared} min=${mem.min} ma
 process.exit(shared && mem.max !== null ? 0 : 1);
 NODE
 
+# The upcall dispatcher is a built-in module and its functions (the method and proxy-slot
+# dispatchers) are exported.
+timeout 300 "$PWD/$hostdir/python.sh" -c 'import sys; assert "_pm_upcall" in sys.builtin_module_names, sys.builtin_module_names' \
+    || die "_pm_upcall is not a built-in module (Setup.local not applied?)"
+node - "$hostdir/python.wasm" <<'NODE' || die "python.wasm does not export the _pm_upcall functions"
+const m = new WebAssembly.Module(require("fs").readFileSync(process.argv[2]));
+const names = new Set(WebAssembly.Module.exports(m).map((e) => e.name));
+const want = ["pm_upcall_dispatch", "pm_upcall_set_target", "pm_upcall_dispatch_index",
+              "pm_tp_traverse", "pm_tp_clear", "pm_tp_dealloc", "pm_proxy_slot_index", "pm_proxy_set_slot_target"];
+const missing = want.filter((n) => !names.has(n));
+console.log(`python.wasm _pm_upcall exports: ${want.filter((n) => names.has(n)).join(",")}${missing.length ? " MISSING " + missing.join(",") : ""}`);
+process.exit(missing.length ? 1 : 0);
+NODE
+log "ok: _pm_upcall built in and exported"
+
 # The interpreter itself: GIL off at run time, four real threads.
 run_smoke() {
     local label="$1"; shift
     local out="$FT_WORK/smoke-$label.log" rc
     set +e
-    timeout 600 "$@" "$here/smoke.py" > "$out" 2>&1
+    timeout 600 "$@" "$wasm_scripts/smoke.py" > "$out" 2>&1
     rc=$?
     set -e
     cat "$out"
@@ -276,6 +315,7 @@ cp "$hostdir/pyconfig.h" "$stage/include/$stdlib_name/"
     echo "LDFLAGS=$HOST_LDFLAGS"
     echo "trampoline patch: $TRAMPOLINE_PATCH"
     echo "link patch: wasmExports,wasmMemory,wasmTable in EXPORTED_RUNTIME_METHODS (embedding probe)"
+    echo "built-in module: _pm_upcall (upcalls from Python threads, #175 step 2)"
     echo "built from https://www.python.org/ftp/python/ (Python-$PY_VERSION.tgz)"
 } > "$stage/BUILD-INFO.txt"
 

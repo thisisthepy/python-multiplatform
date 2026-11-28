@@ -20,9 +20,16 @@ class Box<T>(var content: T) {
     val size: Int get() = 1
 }
 
-/** A bounded class type parameter: `Owner<Any?>` is not within bounds, so a property mentioning `T`
- * is declined, and no setter is bound for anything (it would write through `Owner<Any?>`). */
+/** A single, bindable class type parameter bound (SPEC U-4a): `T` reads as `Number`, a read goes
+ * through `Bounded<*>` and a write through `Bounded<kotlin.Number>`. */
 class Bounded<T : Number>(var item: T) {
+    var plain: Int = 0
+}
+
+/** An F-bounded class type parameter (SPEC U-4a): no single type stands for `T`, so a property
+ * mentioning it is declined, and no setter is bound for anything (it would write through an
+ * `Owner<...>` this walker cannot spell). */
+class FBounded<T : Comparable<T>>(var item: T) {
     var plain: Int = 0
 }
 

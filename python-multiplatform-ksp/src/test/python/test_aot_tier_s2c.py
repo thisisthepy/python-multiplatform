@@ -1,0 +1,849 @@
+"""AOT mode, tier S2c (design 4.3.2): comprehensions, built without CPython and compared with CPython.
+
+A list, set or dict comprehension that is the value of an assignment to a name or of a `return` is lowered as the loop
+it means (typedpython/comprehensions.py): a hidden local per comprehension variable (Python 3 scoping: the enclosing
+name of the same spelling is not touched), the accumulator built in place, the first iterable evaluated before
+anything else, CPython's exceptions where CPython raises them. Agent proposal, not owner-confirmed.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from test_aot_tier_s1 import _compare, _write
+from typedpython import aot
+
+
+COMPS = """
+import sys
+
+
+def evens(xs: list[int]) -> list[int]:
+    return [x * 2 for x in xs if x % 2 == 0]
+
+
+def lengths(words: list[str]) -> dict[str, int]:
+    out = {w: len(w) for w in words}
+    return out
+
+
+def main() -> None:
+    words = sys.argv[1].split(",")
+    x = "outer"
+    lens = [len(x) for x in words]
+    print(lens, x)
+    upper = [w.upper() for w in words if w]
+    pairs = [i * j for i in range(4) for j in range(i) if j != 1]
+    halves: list[float] = [i / 2 for i in range(4)]
+    counts = lengths(words)
+    firsts = {w[0] for w in words if w}
+    print(upper, pairs, halves, counts, len(firsts), "a" in firsts, "q" in firsts)
+    doubled = [h * 2 for h in halves if h != 0.5]
+    print(doubled)
+    d = {"a": 1, "b": 2}
+    inv = {v: k for k, v in d.items()}
+    vals = [v + 1 for v in d.values()]
+    four = [1, 2, 3, 4]
+    e4 = evens(four)
+    e0 = evens(lens)
+    print(inv, vals, e4, e0)
+    xs = [1, 2, 3]
+    xs = [x + 10 for x in xs]
+    print(xs)
+    chars = [c for c in "h\\u00e9llo" if c != "l"]
+    none = [c for c in ""]
+    print(chars, none, len(none))
+    nested = [a + b for a in words for b in words if a < b]
+    print(nested)
+    nums = [int(t) for t in sys.argv[2].split(",")]
+    print(nums)
+    q = [100 // n for n in nums]
+    print(q)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_list_set_and_dict_comprehensions_are_the_loops_they_mean(tmp_path: Path):
+    """Filters, several `for` clauses, a tuple target over items(), a comprehension over its own target's old value,
+    Python 3 scoping (the outer `x` stays "outer") and the exception of an element (ZeroDivisionError) as in CPython."""
+    _compare(tmp_path, COMPS, [["a,bb,ccc", "1,2,5"], ["b", "5"], ["x,y", "3,0"]])
+
+
+LOOPS = """
+import sys
+
+
+def weigh(words: list[str], nums: list[int]) -> int:
+    t = 0
+    for w, n in zip(words, nums):
+        t += len(w) * n
+    return t
+
+
+def main() -> None:
+    words = sys.argv[1].split(",")
+    nums = [int(t) for t in sys.argv[2].split(",")]
+    i = 99
+    for i, w in enumerate(words):
+        print(i, w)
+    print(i)
+    for i, w in enumerate(words, 1):
+        if i == 2:
+            continue
+        print(i, w, end=";")
+    print()
+    for i, c in enumerate("h\u00e9!", -1):
+        print(i, c)
+    d = {"a": 1, "b": 2}
+    for i, k in enumerate(d):
+        print(i, k)
+    for i, v in enumerate(d.values()):
+        print(i, v)
+    for i, (k, v) in enumerate(d.items()):
+        for j, w in enumerate(words):
+            print(i, k, v, j, w, end=";")
+    print()
+    for i, j in enumerate(range(3, 6)):
+        print(i * j)
+    for w, n in zip(words, nums):
+        print(w * n)
+    print(weigh(words, nums))
+    for a, b, c in zip(words, nums, "xyz"):
+        print(a, b, c)
+    idx = [i * 10 for i, w in enumerate(words) if w]
+    both = {w: n for w, n in zip(words, nums)}
+    print(idx, both)
+    grow = [1, 2]
+    for x, y in zip(grow, nums):
+        grow.append(x + y)
+        print(x, y)
+    print(grow)
+    for i, n in enumerate(nums):
+        if i > 5:
+            break
+        print(100 // n)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_enumerate_and_zip_are_the_loops_they_mean(tmp_path: Path):
+    """`for i, x in enumerate(it, start)` counts beside the loop over `it` (a list, a str, a dict, a view, a range), the
+    counter left at its last value as in CPython; `for a, b in zip(xs, ys)` reads each list or str by index up to the
+    shortest, the length read at every step (a list that grows in the loop is seen growing, as CPython's iterator sees
+    it); both in a `for` statement and in a comprehension. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, LOOPS, [["a,bb,ccc", "1,2,5"], ["b", "5,6"], ["x,y", "3,0"]])
+
+
+REVERSED = """
+import sys
+
+
+def last_first(ws: list[str]) -> str:
+    out = ""
+    for w in reversed(ws):
+        out += w
+    return out
+
+
+def main() -> None:
+    words = sys.argv[1].split(",")
+    nums = [int(t) for t in sys.argv[2].split(",")]
+    for w in reversed(words):
+        print(w)
+    for c in reversed("h\u00e9!"):
+        print(c, end="")
+    print()
+    print(last_first(words))
+    back = [n * 2 for n in reversed(nums) if n != 2]
+    print(back)
+    for i, n in enumerate(reversed(nums)):
+        print(i, n)
+    for w, n in zip(words, nums):
+        for c in reversed(w):
+            print(c * n, end=";")
+    print()
+    shrink = [1, 2, 3, 4]
+    for x in reversed(shrink):
+        print(x)
+        if x == 4:
+            shrink.pop()
+            shrink.pop()
+    print(shrink)
+    grow = [1, 2]
+    for x in reversed(grow):
+        grow.append(x)
+    print(grow)
+    for n in reversed(nums):
+        print(10 // n)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_reversed_is_the_loop_it_means(tmp_path: Path):
+    """`for x in reversed(xs)` of a list or a str reads it by index from its end, the index checked against the length
+    at every step as CPython's reversed list iterator checks it: a list that shrinks in the loop ends it early, one
+    that grows is not seen growing. In a `for` statement, in a comprehension and inside enumerate(). Agent proposal,
+    not owner-confirmed."""
+    _compare(tmp_path, REVERSED, [["a,bb,ccc", "1,2,5"], ["b", "5,6"], ["x,y", "3,0"]])
+
+
+RANGES = """
+import sys
+
+
+def main() -> None:
+    n = int(sys.argv[1])
+    r = range(n)
+    s = range(2, n + 3, 3)
+    t = range(n, -2, -2)
+    print(r, s, t, len(r), len(s), len(t))
+    print(f"{r}|{s!r}|{t} end", str(s), repr(t))
+    for x in s:
+        print(x, end=" ")
+    print()
+    total = 0
+    for x in t:
+        total += x
+    print(total)
+    k = 4
+    print(k in s, 5 in s, 3 in t, 2 in t, -1 not in t, n in r, 0 in r)
+    if r:
+        print("r has", len(r))
+    if not t:
+        print("t is empty")
+    print(bool(s), not r)
+    sq = [x * x for x in s if x != 5]
+    print(sq)
+    for i, x in enumerate(t):
+        print(i, x, end=";")
+    print()
+    r = range(1, n)
+    print(r, len(r), 1 in r, bool(r))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_range_object_is_its_bounds(tmp_path: Path):
+    """`r = range(a, b, STEP)` (a constant step) is held as its start and stop: a `for` loop over it, len(), `in`, its
+    truth and its repr (print, str, repr, an f-string) are CPython's, for a positive and a negative step and an empty
+    range. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, RANGES, [["5"], ["0"], ["1"], ["-3"]])
+
+
+SUMS = """
+import sys
+
+
+def total(xs: list[int]) -> int:
+    return sum(xs)
+
+
+def has(ws: list[str]) -> bool:
+    return any(ws)
+
+
+def main() -> None:
+    nums = [int(t) for t in sys.argv[1].split(",")]
+    fl = [int(t) / 10 for t in sys.argv[1].split(",")]
+    s = sum(nums)
+    s2 = sum(nums, 100)
+    s3 = sum(nums, start=-1)
+    print(s, s2, s3, total(nums))
+    f = sum(fl, 0.0)
+    neg = sum(fl, -0.0)
+    tiny = [0.1] * 10
+    t = sum(tiny, 0.0)
+    big = [1e100, 1.0, -1e100]
+    b = sum(big, 0.0)
+    huge = [1e308, 1e308, -1.0]
+    h = sum(huge, 0.0)
+    print(f, neg, t, t == 1.0, b, h)
+    d = {"a": 1, "b": 2}
+    sv = sum(d.values())
+    sr = sum(range(5))
+    print(sv, sr)
+    w = sys.argv[2].split(",")
+    a1 = any(nums)
+    a2 = all(nums)
+    a3 = any(w)
+    a4 = all(w)
+    e1 = any(range(0))
+    e2 = all(range(0))
+    print(a1, a2, a3, a4, e1, e2, has(w))
+    q = sum(range(100 // nums[0]))
+    print(q)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_sum_any_and_all_of_an_iterable_are_the_loops_they_mean(tmp_path: Path):
+    """`sum(it[, start])`, `any(it)` and `all(it)` bound to a name or returned are the loop each means over any
+    iterable a `for` loop takes: an int sum as CPython adds ints, a float sum (a float start) with CPython's compensated
+    summation (Neumaier, `cs_add` in Python/bltinmodule.c: `sum([1e100, 1.0, -1e100], 0.0)` is 1.0), any() and all()
+    stopping at the first true or false item. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, SUMS, [["1,2,5", "a,,b"], ["0", ""], ["-3,4", "x"]])
+
+
+MINMAX = """
+import sys
+
+
+def lowest(xs: list[int]) -> int:
+    return min(xs)
+
+
+def main() -> None:
+    words = sys.argv[2].split(",")
+    a = max(words)
+    b = min(words)
+    print(a, b)
+    d = {"x": 3, "y": -1}
+    k = max(d)
+    v = min(d.values())
+    r = max(range(3, 10, 4))
+    print(k, v, r)
+    inf = 1e308 * 10.0
+    first = [inf - inf, 1.0, 0.5]
+    later = [1.0, inf - inf, 0.5]
+    n1 = min(first)
+    n2 = min(later)
+    n3 = max(later)
+    print(n1, n2, n3)
+    fl = [int(t) / 4 for t in sys.argv[1].split(",") if t]
+    nums = [int(t) for t in sys.argv[1].split(",") if t]
+    m = max(nums)
+    print(m, lowest(nums))
+    c = min(fl)
+    e = max(fl)
+    print(c, e)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_min_and_max_of_an_iterable_are_the_loops_they_mean(tmp_path: Path):
+    """`min(it)` and `max(it)` bound to a name or returned keep the first item and replace it by an item that compares
+    strictly smaller (larger), as CPython's min_max does: a NaN first stays, a NaN later is skipped; of an empty
+    iterable CPython's ValueError ("max() iterable argument is empty"). Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, MINMAX, [["3,1,4", "b,a,c"], ["7", "z"], ["", "q"]])
+
+
+SORTS = """
+import sys
+
+
+def lcg(x: int) -> int:
+    return (x * 1103515245 + 12345) % 2147483648
+
+
+def main() -> None:
+    seed = int(sys.argv[1])
+    n = int(sys.argv[2])
+    xs = [0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        xs[i] = seed % 50
+    ys = sorted(xs)
+    zs = sorted(xs, reverse=True)
+    print(ys)
+    print(zs)
+    inf = 1e308 * 10.0
+    nan = inf - inf
+    fl = [0.0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        k = seed % 20
+        fl[i] = nan if k == 0 else k / 4 - 2
+    fr = sorted(fl, reverse=True)
+    fl.sort()
+    print(fl)
+    print(fr)
+    runs = [0] * n
+    for i in range(n):
+        runs[i] = (i % 37) // 3 if (i // 37) % 2 == 0 else 20 - (i % 37) // 4
+    runs.sort()
+    print(runs)
+    big = [v * 1000000000000000000 - 7 for v in xs]
+    big.sort(reverse=True)
+    if n > 0:
+        print(big[0], big[n // 2], big[n - 1])
+    words = sys.argv[3].split(",")
+    words.sort(reverse=True)
+    d = {"b": 1, "a": 2, "c": 0}
+    ks = sorted(d)
+    vs = sorted(d.values(), reverse=True)
+    flag = n > 10
+    ws = sorted(words, reverse=flag)
+    print(words, ks, vs, ws)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_sorted_and_list_sort_are_cpythons_listsort(tmp_path: Path):
+    """`xs.sort(reverse=...)` of a list of int, float or str, and `sorted(it, reverse=...)` bound to a name or returned,
+    are CPython's own listsort (Objects/listobject.c, ported in tp_aot.h: binary insertion, count_run with its
+    reversal of equal runs, galloping, the powersort merge order), so where the NaN of a list of float end up is
+    CPython's, for short lists and for lists long enough to merge and gallop. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, SORTS, [["1", "0", "a"], ["7", "65", "b,a,c"], ["42", "700", "x,y,x,z"], ["5", "2000", "q"]])
+
+
+def _rules(tmp_path: Path, source: str) -> set[tuple[str, str]]:
+    with pytest.raises(aot.AotError) as raised:
+        aot.generate(_write(tmp_path, source))
+    return {(f.rule, f.message) for f in raised.value.findings}
+
+
+MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    main()\n'
+
+
+@pytest.mark.parametrize("body, reason", [
+    # a comprehension is the value of an assignment to a name or of a return
+    ("    xs = [1, 2]\n    print([x for x in xs])\n", "bind it to a name"),
+    ("    xs = [1, 2]\n    n = len([x for x in xs])\n    print(n)\n", "bind it to a name"),
+    # a generator expression argument is the loop it means only where the call is bound to a name or returned
+    ("    xs = [1, 2]\n    print(sum(x for x in xs))\n", "value of an assignment"),
+    # what the loop it means cannot hold is refused as that loop is
+    ("    xs = [1, 2]\n    ys = [x > 1 for x in xs]\n    print(ys)\n", "list[bool]"),
+    # a name bound inside it (`:=`) leaks to the enclosing scope in CPython; `:=` is outside the AOT mode anyway
+    ("    xs = [1, 2]\n    ys = [(y := x) for x in xs]\n    print(ys)\n", "NamedExpr"),
+    # enumerate and zip are the iterable of a loop, unpacked into names
+    ("    xs = [1, 2]\n    for t in enumerate(xs):\n        print(t)\n", "unpacked into"),
+    ("    xs = [1, 2]\n    e = enumerate(xs)\n    print(e)\n", "enumerate"),
+    ("    xs = [1, 2]\n    n = len(xs)\n    for i, x in enumerate(xs, n):\n        print(i, x)\n", "start"),
+    ("    xs = [1, 2]\n    for a, b in zip(xs, xs, strict=True):\n        print(a, b)\n", "keyword"),
+    ("    xs = [1, 2]\n    for a, b in zip(xs, [3]):\n        print(a, b)\n", "names"),
+    ("    xs = [1, 2]\n    for a in zip(xs, xs):\n        print(a)\n", "unpacked into"),
+    ("    xs = [1, 2]\n    ys = [3]\n    for a, b in zip(xs, ys):\n        xs = ys\n        print(a, b)\n", "rebinds"),
+    ("    d = {1: 2}\n    xs = [1, 2]\n    for a, b in zip(d, xs):\n        print(a, b)\n", "a list or a str"),
+    ("    d = {1: 2}\n    xs = [1, 2]\n    ys = [a + b for a, b in zip(d, xs)]\n    print(ys)\n", "a dict or a set"),
+    # reversed() is the iterable of a loop, of a list or a str name the loop does not rebind
+    ("    d = {1: 2}\n    for k in reversed(d):\n        print(k)\n", "a list or a str"),
+    ("    d = {1: 2}\n    ks = [k for k in reversed(d)]\n    print(ks)\n", "a dict or a set"),
+    ("    xs = [1, 2]\n    r = reversed(xs)\n    print(r)\n", "reversed"),
+    ("    xs = [1, 2]\n    for x in reversed(xs):\n        xs = [3]\n        print(x)\n", "rebinds"),
+    ("    xs = [1, 2]\n    for x in reversed(xs + xs):\n        print(x)\n", "names"),
+    # a range object is used by a loop, len(), `in`, its truth and its repr; its step is an int constant
+    ("    r = range(3)\n    print(list(r))\n", "a range object"),
+    ("    r = range(3)\n    print(r[0])\n", "a range object"),
+    ("    r = range(3)\n    r = 4\n    print(r)\n", "a range object"),
+    ("    n = 2\n    r = range(0, 9, n)\n    print(len(r))\n", "step"),
+    ("    r = range(1, 5, 0)\n    print(len(r))\n", "must not be zero"),
+    ("    r = range(3)\n    xs = [1, 2]\n    for a, b in zip(r, xs):\n        print(a, b)\n", "a list or a str"),
+    # sum(), any(), all() of an iterable are bound to a name or returned; a float sum has a float start
+    ("    xs = [1, 2]\n    print(sum(xs))\n", "bind it to a name"),
+    ("    xs = [1.5, 2.5]\n    s = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
+    ("    xs = ['a']\n    s = sum(xs)\n    print(s)\n", "sum() of"),
+    ("    xs = [1.5, 2.5]\n    s: float = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
+    ("    xs = [1, 2]\n    s = any(xs, xs)\n    print(s)\n", "one argument"),
+    # min() and max() of an iterable are bound to a name or returned; default= is a constant or a name
+    # of the items' type
+    ("    xs = [1, 2]\n    print(min(xs))\n", "bind it to a name"),
+    ("    xs = [1, 2]\n    m = max(xs, default=None)\n    print(m)\n", "default"),
+    ("    xs = [1, 2]\n    m = max(xs, default=len(xs))\n    print(m)\n", "default"),
+    ("    xs = [1.5]\n    m = min(xs, default=0)\n    print(m)\n", "default"),
+    # sorted() bound to a name or returned
+    ("    xs = [1, 2]\n    print(sorted(xs))\n", "bind it to a name"),
+    ("    xs = [1, 2]\n    ys = sorted(xs, reverse=len(xs) > 1)\n    print(ys)\n", "reverse"),
+    # (found here: a comprehension over a list[float] was refused, and float() of a str reached the verifier)
+    ("    w = '1.5'\n    x = float(w)\n    print(x)\n", "float() of a str"),
+])
+def test_what_a_comprehension_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
+    found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
+    assert any(reason in r or reason in m for r, m in found), found
+
+
+BYTES = """
+import sys
+
+
+def tail(b: bytes, n: int) -> bytes:
+    return b[len(b) - n:]
+
+
+def strip_a(b: bytes) -> bytes:
+    while b and b[0] == 97:
+        b = b[1:]
+    return b
+
+
+def count_in(b: bytes, x: int) -> int:
+    n = 0
+    for c in b:
+        if c == x:
+            n += 1
+    return n
+
+
+def main() -> None:
+    mode = sys.argv[1]
+    text = sys.argv[2]
+    raw = text.encode()
+    print(raw, len(raw), repr(raw), str(raw))
+    lit = b"a'b\\"\\t\\n\\r\\x00\\x1f\\x7f\\x80\\xff\\\\"
+    print(lit, len(lit))
+    print(b"it's", b'say "hi"', b"both ' and \\"")
+    e = b""
+    print(e, len(e), e == b"")
+    u = "d\\u00e9j\\u00e0 \\u4e16 \\U0001F600".encode("utf-8")
+    back = u.decode()
+    print(u, len(u), back, u.decode("utf-8") == "d\\u00e9j\\u00e0 \\u4e16 \\U0001F600", len(back))
+    print(raw[0] if raw else -1, raw[-1] if raw else -1, u[1], u[-1])
+    print(u[1:3], u[::-1], u[::2], u[-3:], u[5:1:-1], raw[:0])
+    cat = raw + b"|" + lit
+    rep = b"ab" * 3
+    rep2 = 2 * b"xy"
+    zero = b"q" * -1
+    print(cat, rep, rep2, zero)
+    print(raw == text.encode(), raw != lit, b"abc" < b"abd", b"ab" < b"abc", b"\\xff" > b"a", b"b" >= b"b",
+          b"a" <= b"")
+    print(b"bc" in b"abcd", b"x" not in b"abcd", b"" in e, 98 in b"abc", 0 in lit, 255 not in lit)
+    codes = [c for c in u]
+    print(codes, count_in(raw, 97), tail(u, 4), strip_a(b"aaab"), strip_a(b"aaa"))
+    total = sum(raw)
+    hi = max(u)
+    print(total, hi)
+    print(bytes(3), bytes(0), bytes([104, 105, 0, 255]), bytes(codes) == u)
+    print(f"{raw} {lit!r} {u}")
+    s = b"loop"
+    while s:
+        s = s[1:]
+        print(s)
+    if mode == "encode":
+        bad = "x" + chr(0xDC80) + "y"
+        print(bad.encode())
+    if mode == "encode2":
+        bad2 = "ab" + chr(0xD800) + chr(0xDFFF) + "c"
+        print(bad2.encode("utf-8"))
+    if mode == "start":
+        print(b"ab\\x80c".decode())
+    if mode == "cont":
+        print(b"a\\xe2\\x28\\xa1".decode())
+    if mode == "cont3":
+        print(b"\\xf0\\x9f\\x98(".decode())
+    if mode == "end":
+        print(b"ok\\xe4\\xb8".decode())
+    if mode == "surrogate":
+        print(b"\\xed\\xa0\\x80".decode())
+    if mode == "index":
+        print(raw[len(raw)])
+    if mode == "range":
+        print(bytes([1, 256]))
+    if mode == "negative":
+        print(bytes(-len(raw)))
+    if mode == "contains":
+        print(300 in raw)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_bytes_are_cpythons_immutable_byte_arrays(tmp_path: Path):
+    """`bytes` (design 4.3.2, S2c): literals with CPython's escapes in repr, `str.encode()` and `bytes.decode()`
+    (strict UTF-8, each of CPython's UnicodeEncodeError and UnicodeDecodeError messages: invalid start byte, invalid
+    continuation byte after one and after three bytes, unexpected end of data, an encoded surrogate), len, indexing
+    (an int), slicing, `+`, `*`, comparisons, `in` (a bytes or an int), iteration (ints, also in a comprehension, sum()
+    and max()), `bytes(n)` and `bytes(list[int])`, a parameter the function rebinds, as CPython. Agent proposal, not
+    owner-confirmed."""
+    _compare(tmp_path, BYTES, [["ok", "héllo w"], ["ok", ""], ["encode", "x"], ["encode2", "y"],
+                               ["start", "a"], ["cont", "a"], ["cont3", "a"], ["end", "a"], ["surrogate", "a"],
+                               ["index", "abc"], ["range", "a"], ["negative", "ab"], ["contains", "a"]])
+
+
+@pytest.mark.parametrize("body, reason", [
+    # bytes stay out of containers, fields and the library boundary in this step
+    ("    xs = [b'a']\n    print(len(xs))\n", "bytes"),
+    ("    d = {b'a': 1}\n    print(len(d))\n", "bytes"),
+    # bytes and str never compare equal in CPython; an AOT program does not compile the comparison
+    ("    b = b'a'\n    print(b == 'a')\n", "bytes"),
+    # only strict UTF-8
+    ("    b = b'a'\n    print(b.decode('latin-1'))\n", "utf-8"),
+    ("    s = 'a'\n    print(s.encode(errors='ignore'))\n", "errors"),
+    ("    b = b'a'\n    print(b.hex())\n", "hex"),
+    ("    print(bytes('a', 'utf-8'))\n", "bytes("),
+    ("    print(b'%d' % 1)\n", "%"),
+])
+def test_what_bytes_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
+    found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
+    assert any(reason in r or reason in m for r, m in found), found
+
+
+FSTRING_REPR = """
+import sys
+
+
+def words() -> list[str]:
+    return sys.argv[1].split(",")
+
+
+def main() -> None:
+    d = {"k": len(sys.argv)}
+    s = f"{d!r}|{words()!r}|{d}|{words()}"
+    print(s)
+    print(f"{d!r} {words()!r}")
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_an_fstring_repr_conversion_of_a_dict_or_list_value_is_one_repr(tmp_path: Path):
+    """`{d!r}` of a dict and `{f()!r}` of a list a call returns are the repr, as `{d}` is (found while adding bytes:
+    the repr text was given to repr() again, so it printed quoted)."""
+    _compare(tmp_path, FSTRING_REPR, [["a,b"], ["x"]])
+
+
+MINMAX_DEFAULT = """
+import sys
+
+
+def lowest(xs: list[int], d: int) -> int:
+    return min(xs, default=d)
+
+
+def main() -> None:
+    xs = [int(t) for t in sys.argv[1].split(",") if t]
+    ws = [w for w in sys.argv[2].split(",") if w]
+    fl = [x / 2 for x in xs]
+    a = min(xs, default=-1)
+    b = max(xs, default=99)
+    c = max(ws, default="none")
+    e = min(fl, default=0.5)
+    none: list[int] = []
+    print(a, b, c, e, lowest(xs, 7), lowest(none, 7))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_min_and_max_with_a_default_give_it_for_an_empty_iterable(tmp_path: Path):
+    """`min(it, default=d)` / `max(it, default=d)` (design 4.3.2, S2c): the loop of min(it), and `d` instead of the
+    ValueError when the iterable is empty; `d` a constant or a name of the items' type. Agent proposal, not
+    owner-confirmed."""
+    _compare(tmp_path, MINMAX_DEFAULT, [["3,1,4", "b,a,c"], ["", ""], ["7", "z"]])
+
+
+KEYED = """
+import sys
+
+
+class P:
+    name: str
+    age: int
+
+    def __init__(self, name: str, age: int) -> None:
+        self.name = name
+        self.age = age
+
+
+def lcg(x: int) -> int:
+    return (x * 1103515245 + 12345) % 2147483648
+
+
+def mod7(x: int) -> int:
+    return x % 7
+
+
+def tail(w: str) -> str:
+    return w[1:]
+
+
+def by_tail(words: list[str]) -> list[str]:
+    return sorted(words, key=tail)
+
+
+def main() -> None:
+    seed = int(sys.argv[1])
+    n = int(sys.argv[2])
+    xs = [0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        xs[i] = seed % 50
+    a = sorted(xs, key=mod7)
+    b = sorted(xs, key=lambda v: -v, reverse=True)
+    k = 3
+    many = n > 100
+    c = sorted(xs, key=lambda v: v % k, reverse=many)
+    print(a)
+    print(b)
+    print(c)
+    inf = 1e308 * 10.0
+    nan = inf - inf
+    fl = [0.0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        j = seed % 20
+        fl[i] = nan if j == 0 else j / 4 - 2
+    fa = sorted(fl, key=abs)
+    fl.sort(key=lambda v: v * v, reverse=True)
+    print(fa)
+    print(fl)
+    big = [v * 1000000000000000000 - 7 for v in xs]
+    big.sort(key=lambda v: v % 1000000000000000003)
+    if n > 0:
+        print(big[0], big[n // 2], big[n - 1])
+    keyed = sorted(xs, key=lambda v: v * 1000000000000000000 % 997)
+    print(keyed)
+    words = sys.argv[3].split(",")
+    w1 = sorted(words, key=len)
+    w2 = by_tail(words)
+    words.sort(key=tail, reverse=True)
+    print(w1, w2, words)
+    d = {"bb": 1, "a": 2, "ccc": 0}
+    byval = sorted(d, key=lambda s: d[s])
+    print(byval)
+    pairs: list[tuple[int, str]] = []
+    for x in xs:
+        pairs.append((x % 5, str(x)))
+    pairs.sort(key=lambda p: p[1])
+    print(pairs)
+    sp = sorted(pairs, key=lambda p: p[0], reverse=True)
+    print(sp)
+    lo = min(words, key=len, default="none")
+    hi = max(xs, key=mod7, default=-1)
+    first = min(xs, key=lambda v: v % 4, default=-1)
+    fm = max(fl, key=lambda v: v * v, default=0.0)
+    print(lo, hi, first, fm)
+    ps = [P("a", 3), P("b", 5), P("c", 5), P("d", 1)]
+    srt = sorted(ps, key=lambda p: p.age, reverse=True)
+    for p in srt:
+        print(p.name, p.age)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_key_function_sorts_and_compares_by_its_keys(tmp_path: Path):
+    """`sorted(it, key=k)`, `xs.sort(key=k)`, `min(it, key=k)` and `max(it, key=k)` (design 4.3.2, S2c), `k` the name
+    of a function or a one-parameter lambda: the keys are computed once per item, left to right, after the list is
+    built (sort) or as each item is read (min, max), and CPython's listsort orders the (key, position) pairs, so equal
+    keys keep their order and reverse=True keeps it too, NaN keys end up where CPython puts them, and every list of a
+    list of tuples moves together. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, KEYED, [["1", "0", "a"], ["7", "65", "bb,a,ccc,dd"], ["42", "700", "xy,yx,x,zz,az"],
+                               ["5", "2000", "q"]])
+
+
+KEY_RAISES = """
+import sys
+
+
+def main() -> None:
+    xs = [int(t) for t in sys.argv[1].split(",")]
+    ys = sorted(xs, key=lambda v: 100 // v)
+    print(ys)
+    xs.sort(key=lambda v: 60 // (v - 1))
+    print(xs)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_key_that_raises_leaves_the_list_as_it_was(tmp_path: Path):
+    """A key function that raises stops the sort before any item moved, with CPython's exception. Agent proposal, not
+    owner-confirmed."""
+    _compare(tmp_path, KEY_RAISES, [["3,1,2"], ["3,0,2"], ["3,1,2,5"]])
+
+
+@pytest.mark.parametrize("body, reason", [
+    # the key is the name of a function or a one-parameter lambda
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=str.lower)\n    print(ys)\n", "key="),
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda a, b=1: a)\n    print(ys)\n", "one parameter"),
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda a: [a for a in xs])\n    print(ys)\n", "lambda"),
+    # the keys are int, float or str
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda v: (v, v))\n    print(ys)\n", "key"),
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda v: v > 1)\n    print(ys)\n", "key"),
+    # list.sort(key=...): CPython shows the key an empty list, which an item or a list name could reach
+    ("    xs = [1, 2]\n    zs = xs\n    xs.sort(key=lambda v: len(zs))\n    print(xs)\n", "empty"),
+    # min() / max() with a key, of items that have no placeholder
+    ("    xs = [[1], [2]]\n    m = min(xs, key=len)\n    print(m)\n", "min()"),
+])
+def test_what_a_key_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
+    found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
+    assert any(reason in r or reason in m for r, m in found), found
+
+
+GENS = """
+import sys
+
+
+def noisy(x: int) -> int:
+    print("item", x)
+    return x
+
+
+def total(xs: list[int]) -> int:
+    return sum(x for x in xs)
+
+
+def main() -> None:
+    xs = [int(t) for t in sys.argv[1].split(",")]
+    s = sum(x * 2 for x in xs if x != 3)
+    f = sum((x / 2 for x in xs), 0.0)
+    a = any(noisy(x) > 2 for x in xs)
+    b = all(noisy(x) < 4 for x in xs)
+    print(s, f, a, b, total(xs))
+    m = min(x * x for x in xs)
+    n = max((x - 1 for x in xs if x > 100), default=-1)
+    q = sum(i * j for i in range(3) for j in xs)
+    w = sorted(str(x) for x in xs)
+    print(m, n, q, w)
+    o = sorted((noisy(x) for x in xs), key=lambda v: -v)
+    print(o)
+    p = min((noisy(x) for x in xs), key=lambda v: noisy(v) % 3)
+    print(p)
+    e = max(noisy(x) for x in xs if x > 1000)
+    print(e)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_generator_expression_argument_is_the_loop_it_means(tmp_path: Path):
+    """A generator expression that is the argument of sum(), any(), all(), min(), max() or sorted() bound to a name or
+    returned (leader, 2026-11-28: accepted, laziness and the short-circuit kept): its first iterable is evaluated
+    first, then each item is computed when the call takes it, so any() and all() stop computing at the first true
+    (false) item, min() / max() take each key right after its item, and sorted() computes every item before any key;
+    an empty one still raises CPython's ValueError. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, GENS, [["1,5,3,2"], ["4"], ["2,2,9,1,0"]])
+
+
+@pytest.mark.parametrize("body, reason", [
+    # a generator expression is accepted only as the argument of such a call bound to a name or returned
+    ("    xs = [1, 2]\n    g = (x for x in xs)\n    print(g)\n", "generator"),
+    # CPython evaluates the iterable before the start
+    ("    xs = [1, 2]\n    s = sum(list(xs), len(xs))\n    print(s)\n", "start"),
+])
+def test_what_a_generator_argument_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
+    found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
+    assert any(reason in r or reason in m for r, m in found), found

@@ -43,11 +43,13 @@ import ast
 import datetime
 import json
 import os
+import platform
 import shutil
 import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -634,6 +636,309 @@ def measure_pair(name: str, a_cmd: list[str], b_cmd: list[str], c_cmd: list[str]
     return out
 
 
+AOT_BENCHMARKS: dict[str, tuple[str, str, str | None]] = {
+    "empty": ("empty.py", "empty", None),
+    "hello": ("hello.py", "hello", None),
+    "nbody": ("nbody.py", "nbody", "200000"),
+    "spectral-norm": ("spectral_norm.py", "spectral_norm", "400"),
+    "fannkuch-redux": ("fannkuch.py", "fannkuch", "9"),
+}
+AOT_SHARED_RUNNER_NOTE = "Recorded on a shared runner; compare ratios, not absolute times."
+
+
+def normalize_ru_maxrss(raw_maxrss: int, system: str | None = None) -> int:
+    """Convert getrusage/wait4 ru_maxrss to bytes (macOS reports bytes; Linux reports KiB)."""
+    sys_name = system if system is not None else platform.system()
+    if sys_name == "Darwin":
+        return int(raw_maxrss)
+    return int(raw_maxrss) * 1024
+
+
+def read_cpu_model(cpuinfo_path: Path | None = None) -> str:
+    """Return the CPU model string from /proc/cpuinfo on Linux, or platform.processor()."""
+    path = cpuinfo_path if cpuinfo_path is not None else Path("/proc/cpuinfo")
+    try:
+        if path.is_file():
+            for line in path.read_text(errors="replace").splitlines():
+                if line.lower().startswith("model name") and ":" in line:
+                    model = line.split(":", 1)[1].strip()
+                    if model:
+                        return model
+    except OSError:
+        pass
+    return platform.processor() or platform.machine() or "unknown"
+
+
+def _cmd_version(cmd: list[str]) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        out = (r.stdout.strip() or r.stderr.strip()).splitlines()
+        return out[0] if out else "unknown"
+    except OSError:
+        return "unknown"
+
+
+def collect_aot_metadata(python: str, rustc: str | None = None) -> dict[str, str]:
+    """Collect runner, toolchain, and commit metadata for an aot-measure run."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True
+        ).stdout.strip() or "unknown"
+    except OSError:
+        commit = "unknown"
+    runner_image = f"{os.environ.get('ImageOS', platform.system())} {os.environ.get('ImageVersion', platform.release())}".strip()
+    rustc_bin = rustc or shutil.which("rustc") or "rustc"
+    return {
+        "commit": commit,
+        "runner_image": runner_image,
+        "cpu_model": read_cpu_model(),
+        "python": _cmd_version([python, "--version"]),
+        "rustc": _cmd_version([rustc_bin, "--version"]),
+        "shared_runner_note": AOT_SHARED_RUNNER_NOTE,
+    }
+
+
+def binary_sizes(path: Path) -> tuple[int, int]:
+    """Return (unstripped_bytes, stripped_bytes) without modifying the original binary."""
+    unstripped = path.stat().st_size
+    strip_bin = shutil.which("strip")
+    if not strip_bin:
+        return unstripped, unstripped
+    stripped_path = Path(f"{path}.stripped")
+    shutil.copy2(path, stripped_path)
+    result = subprocess.run([strip_bin, str(stripped_path)], capture_output=True, text=True)
+    if result.returncode != 0:
+        return unstripped, unstripped
+    return unstripped, stripped_path.stat().st_size
+
+
+def run_once_with_usage(cmd: list[str], env: dict[str, str] | None = None) -> dict[str, object]:
+    """Run one child process and return wall time, CPU time, peak RSS (bytes), exit code, and stdout.
+
+    On Linux, `subprocess.Popen` (`fork` + `exec`) and even `posix_spawnp` (which falls back to
+    `clone`/`vfork` sharing the parent's `mm` until `execve`) can inherit the parent Python
+    harness's peak RSS into `ru_maxrss` (#488). To isolate the child's own peak RSS on Linux,
+    we invoke GNU `/usr/bin/time -f "%M %U %S"` when available (the tiny `time` binary's own
+    RSS is ~2 MiB, independent of the Python harness). On macOS, `os.posix_spawnp` + `os.wait4`
+    measures the child's own `ru_maxrss` directly.
+    """
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        start = time.perf_counter()
+        gnu_time = "/usr/bin/time" if (sys.platform.startswith("linux") and os.path.isfile("/usr/bin/time")) else None
+        if gnu_time is not None:
+            with tempfile.NamedTemporaryFile(mode="r+", encoding="utf-8") as stat_f:
+                wrapped = [gnu_time, "-f", "%M %U %S", "-o", stat_f.name, "--", *cmd]
+                res = subprocess.run(wrapped, stdout=out_f, stderr=err_f, env=env)
+                elapsed = time.perf_counter() - start
+                returncode = res.returncode
+                stat_f.seek(0)
+                stat_text = stat_f.read().strip()
+                parts = stat_text.splitlines()[-1].split() if stat_text else []
+                if len(parts) == 3:
+                    max_rss_bytes = int(parts[0]) * 1024
+                    cpu_s = float(parts[1]) + float(parts[2])
+                else:
+                    max_rss_bytes = 0
+                    cpu_s = elapsed
+        elif hasattr(os, "posix_spawnp") and hasattr(os, "wait4"):
+            spawn_env = os.environ if env is None else env
+            file_actions = [
+                (os.POSIX_SPAWN_DUP2, out_f.fileno(), 1),
+                (os.POSIX_SPAWN_DUP2, err_f.fileno(), 2),
+            ]
+            pid = os.posix_spawnp(cmd[0], cmd, spawn_env, file_actions=file_actions)
+            _, status, rusage = os.wait4(pid, 0)
+            elapsed = time.perf_counter() - start
+            returncode = os.waitstatus_to_exitcode(status)
+            cpu_s = float(rusage.ru_utime) + float(rusage.ru_stime)
+            max_rss_bytes = normalize_ru_maxrss(int(rusage.ru_maxrss))
+        elif hasattr(os, "wait4"):
+            proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, env=env)
+            _, status, rusage = os.wait4(proc.pid, 0)
+            elapsed = time.perf_counter() - start
+            returncode = os.waitstatus_to_exitcode(status)
+            proc.returncode = returncode
+            cpu_s = float(rusage.ru_utime) + float(rusage.ru_stime)
+            max_rss_bytes = normalize_ru_maxrss(int(rusage.ru_maxrss))
+        else:
+            res = subprocess.run(cmd, stdout=out_f, stderr=err_f, env=env)
+            elapsed = time.perf_counter() - start
+            returncode = res.returncode
+            cpu_s = elapsed
+            max_rss_bytes = 0
+        out_f.seek(0)
+        err_f.seek(0)
+        stdout = out_f.read().decode("utf-8", errors="replace").strip()
+        stderr = err_f.read().decode("utf-8", errors="replace").strip()
+    return {
+        "wall_s": elapsed,
+        "cpu_s": cpu_s,
+        "max_rss_bytes": max_rss_bytes,
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def compute_aot_ratios(aot: dict[str, object], rust: dict[str, object]) -> dict[str, float | None]:
+    """Compute aot / rust ratios for stripped_bytes, max_rss_bytes, cpu_s, and wall_s."""
+    ratios: dict[str, float | None] = {}
+    for key in ("stripped_bytes", "max_rss_bytes", "cpu_s", "wall_s"):
+        a_val = aot.get(key)
+        r_val = rust.get(key)
+        if isinstance(a_val, (int, float)) and isinstance(r_val, (int, float)) and r_val > 0:
+            ratios[key] = float(a_val) / float(r_val)
+        else:
+            ratios[key] = None
+    return ratios
+
+
+def _fmt_bytes(n: object) -> str:
+    if not isinstance(n, (int, float)):
+        return "n/a"
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.2f} MiB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KiB"
+    return f"{int(n)} B"
+
+
+def _fmt_ratio(v: object) -> str:
+    if not isinstance(v, (int, float)):
+        return "n/a"
+    return f"{v:.2f}x"
+
+
+def _fmt_secs(v: object) -> str:
+    if not isinstance(v, (int, float)):
+        return "n/a"
+    return f"{v:.4f}s"
+
+
+def format_aot_report(metadata: dict[str, str], results: dict[str, dict[str, object]]) -> str:
+    """Format the aot-measure metadata header and Markdown summary table."""
+    lines = [
+        f"commit: {metadata.get('commit', 'unknown')}",
+        f"runner_image: {metadata.get('runner_image', 'unknown')}",
+        f"cpu_model: {metadata.get('cpu_model', 'unknown')}",
+        f"python: {metadata.get('python', 'unknown')}",
+        f"rustc: {metadata.get('rustc', 'unknown')}",
+        f"note: {metadata.get('shared_runner_note', AOT_SHARED_RUNNER_NOTE)}",
+        "",
+        "| benchmark | size | AOT stripped | Rust stripped | size ratio | AOT RSS | Rust RSS | CPython RSS | RSS ratio | AOT CPU | Rust CPU | CPU ratio |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for name, entry in results.items():
+        size = entry.get("size") or "-"
+        aot = entry["TypedPython AOT"]  # type: ignore[index]
+        rust = entry["Rust"]  # type: ignore[index]
+        cpy = entry["CPython"]  # type: ignore[index]
+        ratios = entry["ratios_vs_rust"]  # type: ignore[index]
+        lines.append(
+            f"| {name} | {size} | {_fmt_bytes(aot['stripped_bytes'])} | {_fmt_bytes(rust['stripped_bytes'])} | "  # type: ignore[index]
+            f"{_fmt_ratio(ratios['stripped_bytes'])} | {_fmt_bytes(aot['max_rss_bytes'])} | "  # type: ignore[index]
+            f"{_fmt_bytes(rust['max_rss_bytes'])} | {_fmt_bytes(cpy['max_rss_bytes'])} | "  # type: ignore[index]
+            f"{_fmt_ratio(ratios['max_rss_bytes'])} | {_fmt_secs(aot['cpu_s'])} | "  # type: ignore[index]
+            f"{_fmt_secs(rust['cpu_s'])} | {_fmt_ratio(ratios['cpu_s'])} |"  # type: ignore[index]
+        )
+    return "\n".join(lines)
+
+
+def aot_measure(args: argparse.Namespace) -> int:
+    """Build and measure CPython, Rust, and TypedPython AOT across baseline + Tier-K programs."""
+    if not args.typedpython:
+        sys.stderr.write("aot-measure requires --typedpython <dir>\n")
+        return 1
+    cargo_bin = os.environ.get("CARGO") or shutil.which("cargo") or CARGO
+    rust_bins = [rs for _, rs, _ in AOT_BENCHMARKS.values()]
+    rust_cmd = [cargo_bin, "build", "--release", "--quiet"]
+    for b in rust_bins:
+        rust_cmd.extend(["--bin", b])
+    run_checked(rust_cmd, cwd=ROOT / "rust", env=dict(os.environ, CARGO_TARGET_DIR=str(TARGET)))
+
+    aot_dir = TP_BUILD / "aot"
+    aot_dir.mkdir(parents=True, exist_ok=True)
+    tp_env = dict(os.environ, PYTHONPATH=str(Path(args.typedpython).resolve()))
+    aot_exes: dict[str, Path] = {}
+    for name, (py, _, _) in AOT_BENCHMARKS.items():
+        out_exe = aot_dir / name
+        run_checked(
+            [args.typedpython_python, "-m", "typedpython", "aot-build", str(ROOT / "py" / py), "-o", str(out_exe)],
+            env=tp_env,
+        )
+        aot_exes[name] = out_exe
+
+    metadata = collect_aot_metadata(args.python)
+    results: dict[str, dict[str, object]] = {}
+    mismatch = False
+
+    for name, (py, rs, default_size) in AOT_BENCHMARKS.items():
+        size = args.size.get(name, default_size)
+        argv = [size] if size is not None else []
+        rust_exe = TARGET / "release" / rs
+        aot_exe = aot_exes[name]
+        rust_unstripped, rust_stripped = binary_sizes(rust_exe)
+        aot_unstripped, aot_stripped = binary_sizes(aot_exe)
+
+        cmds = {
+            "CPython": [args.python, str(ROOT / "py" / py), *argv],
+            "Rust": [str(rust_exe), *argv],
+            "TypedPython AOT": [str(aot_exe), *argv],
+        }
+        sizes_map: dict[str, tuple[int | None, int | None]] = {
+            "CPython": (None, None),
+            "Rust": (rust_unstripped, rust_stripped),
+            "TypedPython AOT": (aot_unstripped, aot_stripped),
+        }
+
+        prog_res: dict[str, object] = {"size": size}
+        outputs: dict[str, str] = {}
+        for col, cmd in cmds.items():
+            runs = []
+            for _ in range(args.repeat):
+                r = run_once_with_usage(cmd)
+                if r["returncode"] != 0:
+                    sys.stderr.write(
+                        f"{name}/{col}: exited with {r['returncode']}\n{r['stderr']}\n"
+                    )
+                    return 1
+                runs.append(r)
+            out_set = {r["stdout"] for r in runs}
+            if len(out_set) != 1:
+                sys.stderr.write(f"{name}/{col}: non-deterministic output across repeats: {out_set!r}\n")
+                return 1
+            out_str = str(runs[0]["stdout"])
+            outputs[col] = out_str
+            unstripped, stripped = sizes_map[col]
+            prog_res[col] = {
+                "wall_s": statistics.median(float(r["wall_s"]) for r in runs),  # type: ignore[arg-type]
+                "cpu_s": statistics.median(float(r["cpu_s"]) for r in runs),  # type: ignore[arg-type]
+                "max_rss_bytes": int(statistics.median(int(r["max_rss_bytes"]) for r in runs)),  # type: ignore[arg-type]
+                "unstripped_bytes": unstripped,
+                "stripped_bytes": stripped,
+                "output": out_str,
+            }
+
+        if len(set(outputs.values())) != 1:
+            sys.stderr.write(f"{name}: OUTPUTS DIFFER: {outputs!r}\n")
+            mismatch = True
+        prog_res["ratios_vs_rust"] = compute_aot_ratios(
+            prog_res["TypedPython AOT"],  # type: ignore[arg-type]
+            prog_res["Rust"],  # type: ignore[arg-type]
+        )
+        results[name] = prog_res
+
+    print(format_aot_report(metadata, results))
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps({"metadata": metadata, "repeat": args.repeat, "results": results}, indent=2) + "\n"
+        )
+        print(f"wrote {out_path}")
+    return 1 if mismatch else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -659,9 +964,21 @@ def main() -> int:
     m.add_argument("--write", action="store_true")
     m.add_argument("--size", action="append", default=[], metavar="NAME=N",
                    help="override a benchmark size (for runner smoke tests only)")
+    aot = sub.add_parser("aot-measure", help="measure CPython, Rust, and TypedPython AOT (size, RSS, CPU)")
+    aot.add_argument("--python", default=sys.executable)
+    aot.add_argument("--typedpython", metavar="DIR", required=True,
+                     help="directory holding the typedpython package")
+    aot.add_argument("--typedpython-python", default=sys.executable,
+                     help="interpreter for running typedpython aot-build")
+    aot.add_argument("--repeat", type=int, default=3)
+    aot.add_argument("--size", action="append", default=[], metavar="NAME=N",
+                     help="override a benchmark size")
+    aot.add_argument("--out", metavar="PATH", help="write full JSON report to PATH")
     args = parser.parse_args()
-    if args.cmd in ("measure", "interleaved"):
+    if args.cmd in ("measure", "interleaved", "aot-measure"):
         args.size = dict(s.split("=", 1) for s in args.size)
+    if args.cmd == "aot-measure":
+        return aot_measure(args)
     if args.cmd == "interleaved":
         return interleaved(args)
     return verify(args) if args.cmd == "verify" else measure(args)

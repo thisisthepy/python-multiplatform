@@ -10,7 +10,10 @@ name: WasmJS CI
 # python-multiplatform/build.gradle.kts.
 #
 # `compile` is what a runner can always do honestly, and it is named for exactly that.
-# `test` runs the real suite, and runs only when there is a runtime to run it against.
+# `test` builds the runtime itself and runs the real suite against it. Leader, Decision 11 (a),
+# 2026-11-26 (team report pmp-binder.md): "wasm.yml's test job runs build-cpython.sh itself, output in
+# actions/cache keyed on the script and _pm_upcall.c hashes. No release asset." Until then the job
+# was gated on a `WASM_RUNTIME_URL` repository variable that was never set, so it never ran.
 
 on:
   # Runs only as part of ci.yml, which is started by hand (owner, 2026-11-14: "개발 테스트 ci는
@@ -51,33 +54,14 @@ jobs:
       - name: Compile wasmJs main and test sources
         run: ./gradlew :python-multiplatform:compileKotlinWasmJs :python-multiplatform:wasmJsTestClasses --console=plain
 
-      # Says out loud what the green tick above does and does not cover, so that a reader of this
-      # workflow's result does not have to infer it. Drops away the moment the runtime URL exists.
-      - name: Say what did not run
-        if: vars.WASM_RUNTIME_URL == ''
-        run: |
-          {
-            echo "### wasmJs tests did not run"
-            echo
-            echo "This job compiled \`wasmJsMain\` and \`wasmJsTest\`. **No wasm test was executed.**"
-            echo
-            echo "Running them needs a CPython Emscripten build, which this repository publishes as"
-            echo "\`org.thisisthepy:python-multiplatform-wasm-runtime\` (a 7 MB zip built by"
-            echo "\`:python-multiplatform:wasmBrowserRuntimeZip\`) but has never pushed to a remote"
-            echo "repository -- it exists only in the maintainer's \`mavenLocal\`."
-            echo
-            echo "Set the repository variable \`WASM_RUNTIME_URL\` to a URL that serves that zip"
-            echo "(a GitHub release asset is enough) and the \`test\` job below will run the real"
-            echo "suite: 344 Node tests and 10 browser tests."
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::warning title=wasmJs tests did not run::No CPython Emscripten runtime is available to this runner; set the WASM_RUNTIME_URL repository variable. This job compiled only."
-
   test:
-    name: WasmJS Node + browser tests
-    runs-on: ubuntu-latest
-    # The whole point of the guard: this job exists only when it can do its job. A job that does not
-    # run shows up grey in the checks list, which is a different claim from a green one.
-    if: vars.WASM_RUNTIME_URL != ''
+    name: WasmJS Node + browser tests (CPython 3.15t built here)
+    runs-on: ubuntu-24.04
+    # A cold cache is a full CPython build (a free-threaded build Python, then the wasm32 cross build).
+    timeout-minutes: 150
+    env:
+      # build-cpython.sh's default staging directory, and the one -PwasmPythonDir points at below.
+      WASM_RUNTIME_DIR: ${{ github.workspace }}/.caches/wasm-runtime
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,10 +73,12 @@ jobs:
           distribution: 'zulu'
           cache: 'gradle'
 
+      # CPython 3.15.0 pins node 24 (Platforms/emscripten/config.toml, node-version); the runtime is
+      # built with -fwasm-exceptions and pthreads, and the test tasks run it under this node.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Cache Konan
         uses: actions/cache@v4
@@ -102,26 +88,52 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-konan-
 
-      # The five files this unpacks are the whole interpreter as far as the test tasks are
-      # concerned -- python.wasm, python.mjs, the stdlib zip and the two glue modules. That is a
-      # property of `cpython.mjs`'s boot rather than an accident: the Node route used to reach the
-      # standard library through NODEFS against a CPython *source checkout*, which no artefact
-      # carries, and now installs the staged zip into MEMFS exactly as the browser route does.
-      - name: Fetch the CPython Emscripten runtime
+      # The staged runtime (python.wasm, python.mjs, the stdlib zip) is a pure function of the build
+      # script and the C module it compiles in, so those two hashes are the key (Decision 11 (a)).
+      # Restore and save are separate steps so that a red test run still keeps a runtime that built
+      # and passed its own checks; no restore-keys, a runtime from another script is never reused.
+      - name: Restore the CPython 3.15t runtime
+        id: runtime
+        uses: actions/cache/restore@v4
+        with:
+          path: .caches/wasm-runtime
+          key: wasm-cpython315t-${{ runner.os }}-${{ hashFiles('python-multiplatform/scripts/wasm/build-cpython.sh', 'python-multiplatform/scripts/wasm/_pm_upcall.c') }}
+
+      - name: Install build Python prerequisites
+        if: steps.runtime.outputs.cache-hit != 'true'
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          build-essential pkg-config libssl-dev zlib1g-dev libffi-dev
+          libbz2-dev liblzma-dev libsqlite3-dev libzstd-dev
+
+      # The script's default `all`: build, zip, verify (ABI tags, shared memory, Py_GIL_DISABLED,
+      # the _pm_upcall exports), smoke.py under python.sh, stage, and the embedding probe against the
+      # staged runtime. Any of them failing stops here, before a runtime is cached.
+      - name: Build CPython 3.15t for wasm32-emscripten
+        if: steps.runtime.outputs.cache-hit != 'true'
+        run: bash python-multiplatform/scripts/wasm/build-cpython.sh
+
+      - name: Save the CPython 3.15t runtime
+        if: steps.runtime.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .caches/wasm-runtime
+          key: ${{ steps.runtime.outputs.cache-primary-key }}
+
+      - name: Check the runtime
         run: |
           set -euo pipefail
-          curl -fsSL "${{ vars.WASM_RUNTIME_URL }}" -o "$RUNNER_TEMP/wasm-runtime.zip"
-          mkdir -p "$RUNNER_TEMP/wasm-runtime"
-          unzip -q "$RUNNER_TEMP/wasm-runtime.zip" -d "$RUNNER_TEMP/wasm-runtime"
-          for f in python.wasm python.mjs; do
-            test -f "$RUNNER_TEMP/wasm-runtime/$f" \
-              || { echo "::error::$f is not in the runtime zip served by WASM_RUNTIME_URL"; exit 1; }
+          for f in python.wasm python.mjs python3.15t.zip; do
+            test -f "$WASM_RUNTIME_DIR/$f" \
+              || { echo "::error::$f is not in $WASM_RUNTIME_DIR"; exit 1; }
           done
-          ls -l "$RUNNER_TEMP/wasm-runtime"
+          ls -l "$WASM_RUNTIME_DIR"
 
       # `WasmCompiledWheelTest` imports a real compiled pyemscripten_2026_0 wheel. Under
       # `-PrequireWasmRuntime` a missing wheel is a failure, not a skip, so fetch them first: by URL,
-      # each accepted only against the sha256 the script pins.
+      # each accepted only against the sha256 the script pins. The script pins none today: the
+      # wheel has to be a pypackpack-built cp315t one (leader, Decision 10 (c) c1, 2026-11-26), and
+      # until pypackpack #82 produces it this job fails on that one test, by name, by design.
       - name: Fetch the pinned wasm wheels
         run: bash python-multiplatform/scripts/wasm/build-cpython.sh wheels
 
@@ -129,13 +141,19 @@ jobs:
       # to repeat the original defect: if either task would skip -- no interpreter, or no
       # Chromium-family browser for karma -- the build fails naming what was missing, instead of
       # reporting success having run nothing.
+      #
+      # `--continue`: one suite's failure must not hide the other's result. Without it a red
+      # wasmJsNodeTest (run 45829018834: only WasmCompiledWheelTest, Decision 10 (c) c1) stopped Gradle
+      # before wasmJsBrowserTest ran, and the browser suite reported nothing. The step still fails
+      # when either suite does.
       - name: Run wasmJs tests
         run: |
           ./gradlew \
             :python-multiplatform:wasmJsNodeTest \
             :python-multiplatform:wasmJsBrowserTest \
-            -PwasmPythonDir="$RUNNER_TEMP/wasm-runtime" \
+            -PwasmPythonDir="$WASM_RUNTIME_DIR" \
             -PrequireWasmRuntime=true \
+            --continue \
             --console=plain
 
       # Belt to the guard's braces, and it guards a different failure: a task that *runs* but

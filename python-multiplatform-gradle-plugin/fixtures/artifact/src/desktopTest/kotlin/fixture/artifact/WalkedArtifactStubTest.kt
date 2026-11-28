@@ -244,7 +244,10 @@ class WalkedArtifactStubTest {
                 Regex("""Kotlin member: ([^\s"]+)""").findAll(stub(path)).map { it.groupValues[1] }.toList()
             }
             .toSet()
-        val memberKeys = UpcallTable.entries().filter { it.kind.name == "METHOD" }.map { it.name }.toSet()
+        // Not `suspend` ones: a suspend function is bound and awaitable but not stubbed, a documented
+        // limit (`docs/design/pyi-generation-design.md` §3.5, `renderKotlinFqnStubs` filters `isSuspend`).
+        // `kotlinx.coroutines.Job.join` is the first suspend member this fixture walks (#509).
+        val memberKeys = UpcallTable.entries().filter { it.kind.name == "METHOD" && !it.isSuspend }.map { it.name }.toSet()
         assertTrue("fixture.valueclass.member.Tally.reset" in memberKeys, "no member function was bound: $memberKeys")
         assertEquals(emptySet(), members - memberKeys, "a member stub names no member key")
         assertEquals(emptySet(), memberKeys - members, "a member key has no stub")
@@ -265,7 +268,22 @@ class WalkedArtifactStubTest {
         val overloadBases = installed.map { it.substringBeforeLast('.') + "." + it.substringAfterLast('.').substringBefore("__") }
             .filter { it !in installed }.toSet()
         assertEquals(emptySet(), stubbed - installed - overloadBases, "stubbed but not callable")
-        assertEquals(emptySet(), installed - propertyKeys - memberKeys - stubbed - constructors - companions, "callable but not stubbed")
+        // Suspend keys are bound but not stubbed (pyi-generation-design.md §3.5), as above for members.
+        val suspendKeys = UpcallTable.entries().filter { it.isSuspend }.map { it.name }.toSet()
+        // A seventh shape (#322's folding): a receiver class whose companion only publishes constants
+        // is folded into its parent package's `__init__.pyi`, and the constants are attributes of that
+        // class (`class HexFormat:` ... `    Default: HexFormat`), keyed `pkg.HexFormat.Default`.
+        // Counted only in the direction "this key has a stub": a Protocol class has attributes too,
+        // and those are no keys.
+        val classConstants = generatedPaths()
+            .filter { it.endsWith("__init__.pyi") }
+            .flatMap { path -> classAttributeKeys(path.removeSuffix("/__init__.pyi").replace('/', '.'), stub(path)) }
+            .toSet()
+        assertEquals(
+            emptySet(),
+            installed - propertyKeys - memberKeys - stubbed - constructors - companions - suspendKeys - classConstants,
+            "callable but not stubbed",
+        )
     }
 
     /**
@@ -280,5 +298,25 @@ class WalkedArtifactStubTest {
         assertTrue("    def level(self) -> int:" in stub, stub)
         assertTrue("    def bump(self) -> None:" in stub, stub)
         assertFalse("is not stubbed" in stub, stub)
+    }
+
+    /** `module.Class[.Nested].name` for every `name: Type` attribute line inside a class body of [source]. */
+    private fun classAttributeKeys(module: String, source: String): List<String> {
+        val keys = ArrayList<String>()
+        val stack = ArrayList<Pair<Int, String>>()
+        for (line in source.lines()) {
+            if (line.isBlank()) continue
+            val indent = line.length - line.trimStart().length
+            while (stack.isNotEmpty() && stack.last().first >= indent) stack.removeAt(stack.size - 1)
+            val text = line.trimStart()
+            val classMatch = Regex("""^class ([A-Za-z0-9_]+)""").find(text)
+            if (classMatch != null) {
+                stack += indent to classMatch.groupValues[1]
+                continue
+            }
+            val attribute = Regex("""^([A-Za-z0-9_]+): """).find(text) ?: continue
+            if (stack.isNotEmpty()) keys += "$module.${stack.joinToString(".") { it.second }}.${attribute.groupValues[1]}"
+        }
+        return keys
     }
 }

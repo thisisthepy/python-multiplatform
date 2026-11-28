@@ -16,7 +16,7 @@ class PublishedVersionTest {
 
     private val expected: String = Properties().run {
         File("../gradle.properties").inputStream().use { load(it) }
-        "${getProperty("pythonVersion")}-${getProperty("libraryVersionSuffix")}"
+        listOf(getProperty("pythonVersion"), getProperty("libraryVersionSuffix")).filter { it.isNotEmpty() }.joinToString("-")
     }
 
     @Test

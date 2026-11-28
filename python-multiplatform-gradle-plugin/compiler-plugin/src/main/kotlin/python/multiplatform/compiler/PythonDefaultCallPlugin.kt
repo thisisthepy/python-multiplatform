@@ -5,6 +5,7 @@ package python.multiplatform.compiler
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
+import org.jetbrains.kotlin.config.reportLog
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.descriptors.InlineClassRepresentation
 import org.jetbrains.kotlin.ir.IrElement
@@ -49,7 +50,7 @@ class PythonDefaultCallRegistrar : CompilerPluginRegistrar() {
     override val supportsK2: Boolean get() = true
 
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
-        IrGenerationExtension.registerExtension(PythonDefaultCallExtension())
+        IrGenerationExtension.registerExtension(PythonDefaultCallExtension { configuration.reportLog(it) })
     }
 }
 
@@ -64,14 +65,25 @@ class PythonDefaultCallRegistrar : CompilerPluginRegistrar() {
  * extension checks instead of assuming: a marker whose callee has no `$default` parameter is a
  * compilation error naming the cause.
  */
-internal class PythonDefaultCallExtension : IrGenerationExtension {
+internal class PythonDefaultCallExtension(
+    private val log: (String) -> Unit = {},
+) : IrGenerationExtension {
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
-        moduleFragment.transformChildrenVoid(DefaultCallRewriter())
+        val rewriter = DefaultCallRewriter()
+        moduleFragment.transformChildrenVoid(rewriter)
+        // Evidence in a build log (`--info`) that this extension ran in a compilation and what it did:
+        // a clean compile alone cannot tell "rewritten" from "never invoked".
+        if (rewriter.rewritten > 0) {
+            log("python-multiplatform defaults: rewrote ${rewriter.rewritten} $DEFAULT_CALL_MARKER call(s) in ${moduleFragment.name}")
+        }
     }
 }
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
 private class DefaultCallRewriter : IrElementTransformerVoid() {
+
+    /** How many marker calls this pass replaced. */
+    var rewritten: Int = 0
 
     override fun visitCall(expression: IrCall): IrExpression {
         val name = expression.symbol.owner.name.asString()
@@ -95,6 +107,7 @@ private class DefaultCallRewriter : IrElementTransformerVoid() {
                 ?: IrConstImpl.int(expression.startOffset, expression.endOffset, parameter.type, 0)
             maskIndex += 1
         }
+        rewritten += 1
         // The marker is gone; what it wrapped stands in its place. Visited afterwards so the
         // `__pympOmitted()` arguments inside it are replaced too.
         return wrapped.transform(this, null)

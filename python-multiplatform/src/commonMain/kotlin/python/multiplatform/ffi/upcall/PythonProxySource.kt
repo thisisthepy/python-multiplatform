@@ -266,6 +266,9 @@ object PythonProxySource {
     /** The name [AsyncUpcall] resolves out of `__main__` to arm a `Future`'s cancellation notice. */
     internal const val WATCH_FUNCTION = "_pm_watch"
 
+    /** The name [AsyncUpcall] resolves out of `__main__` to create a `Future` on a non-running configured delivery loop. */
+    internal const val CREATE_REMOTE_FUTURE_FUNCTION = "_pm_create_remote_future"
+
     /** The `(long) -> int` entry point `_pm_watch` routes a cancellation to; per-platform. */
     internal const val CANCEL_ENTRY_POINT = "_pm_cancel"
 
@@ -345,6 +348,27 @@ object PythonProxySource {
                     # no-op rather than a slot handed to somebody else.
                     _pm_release(_h)
             _fut.add_done_callback(_pm_done)
+
+
+        def _pm_create_remote_future(_loop, _handle):
+            # Creates an `asyncio.Future` (and, when [_handle] is non-None, arms `_pm_watch`) on
+            # [_loop]'s own thread via `call_soon_threadsafe`, waiting on a `concurrent.futures.Future`
+            # carrier so CPython releases the GIL while waiting and `create_future()` /
+            # `add_done_callback` never run off-thread (SPEC U-5; issue #164, item 10).
+            import concurrent.futures as _pm_cf
+            if _loop.is_closed():
+                raise RuntimeError('delivery event loop is closed')
+            _carrier = _pm_cf.Future()
+            def _make():
+                try:
+                    _f = _loop.create_future()
+                    if _handle is not None:
+                        _pm_watch(_f, _handle)
+                    _carrier.set_result(_f)
+                except BaseException as _e:
+                    _carrier.set_exception(_e)
+            _loop.call_soon_threadsafe(_make)
+            return _carrier.result()
 
 
         def _pm_module(_name):
@@ -715,6 +739,14 @@ object PythonProxySource {
         return main.getAttrOrNull(WATCH_FUNCTION)
     }
 
+    /** Makes sure `_pm_create_remote_future` exists in `__main__` and hands it back. */
+    internal fun createRemoteFutureFunction(): PyObject {
+        val main = Python3.import("__main__")
+        main.getAttrOrNull(CREATE_REMOTE_FUTURE_FUNCTION)?.let { return it }
+        Python3.exec(support)
+        return main.getAttr(CREATE_REMOTE_FUTURE_FUNCTION)
+    }
+
     // ------------------------------------------------------------------------------- rendering
 
     private val ENTRY_POINT_GUARD = """
@@ -859,7 +891,7 @@ object PythonProxySource {
                 # and simply keeps not collecting a Kotlin-side cycle, same as before.
                 _PmGcObject = _PmObject
 
-            def _pm_unwrap(_pm_v, _pm_owners=(_PmObject, _PmGcObject)):
+            def _pm_unwrap(_pm_v, _pm_owners=(_PmObject, _PmGcObject, BaseException)):
                 # What an owner is worth on the wire: the handle inside it. Everything else is
                 # passed through untouched, which is what keeps a bare handle working for every
                 # caller written against the raw contract, and what lets an ordinary Python object
@@ -870,6 +902,11 @@ object PythonProxySource {
                 # a legitimate argument to a `PyObject` parameter *and* to a parameter declared as
                 # the Kotlin class it stands for, and only the declaration says which one this is.
                 # See `PythonProxySource.argValues`.
+                #
+                # A Kotlin throwable's proxy (`${KotlinThrowableProxy.CLASS_GLOBAL}`, SPEC U-2) is an owner
+                # too. An exception cannot share a layout with `_PmObject`, and the class is defined
+                # when the first Kotlin throwable is raised, which can be after this function, so
+                # `BaseException` is in the tuple and the class is looked up only for an exception.
                 #
                 # Both owners, because the decision is no longer made here. `_PmGcObject` is not an
                 # `_PmObject` -- CPython refuses two solid bases -- so testing the one name meant
@@ -882,6 +919,10 @@ object PythonProxySource {
                 # replaced for, at 551-587 ns a time. The owners are a default argument for the same
                 # reason `__del__` binds its releaser that way: one less global lookup per argument.
                 if isinstance(_pm_v, _pm_owners):
+                    if isinstance(_pm_v, BaseException):
+                        _pm_t = globals().get('${KotlinThrowableProxy.CLASS_GLOBAL}')
+                        if _pm_t is None or not isinstance(_pm_v, _pm_t):
+                            return _pm_v
                     _pm_h = _pm_v._pm_handle
                     if not _pm_h:
                         raise ValueError(

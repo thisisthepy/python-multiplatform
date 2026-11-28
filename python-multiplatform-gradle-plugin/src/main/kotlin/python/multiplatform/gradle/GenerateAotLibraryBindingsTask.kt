@@ -7,6 +7,7 @@ import org.gradle.api.provider.Property
 import org.gradle.api.tasks.CacheableTask
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -22,10 +23,14 @@ import org.gradle.api.tasks.TaskAction
  *
  * ### What it reads and writes
  *
- * Reads only the description file (`abi_version` must be 2). Writes, under [outputDirectory] and in the directory
+ * Reads only the description file (`abi_version` must be 3). Writes, under [outputDirectory] and in the directory
  * of [packageName]: `AotFfm.kt` (the FFM helper and `TypedPythonAotException`), `<objectName>.kt` (the object with
- * `load(libraryPath)` and one function per export), `F64List.kt` and `I64List.kt`, and `IntList.kt` when the description has an `int_list` entry. See [renderAotLibraryBindings].
+ * `load(libraryPath)` and one function per export), `F64List.kt` and `I64List.kt`, `IntList.kt` when the description has an `int_list` entry, and one `Dict...kt` per entry of `dicts` (`DictI64I64.kt`, `DictI64F64.kt`, `DictI64Bool.kt`). See [renderAotLibraryBindings].
  * Give each library its own package: the helper and the list classes have fixed names.
+ *
+ * When [resourceOutputDirectory] is set, also writes `META-INF/native-image/<packageName>/<prefix>/reachability-metadata.json`
+ * declaring every foreign downcall descriptor and the `java.lang.foreign` reflection surface of `AotFfmRuntime`, so a
+ * consumer's GraalVM native image picks it up automatically from the classpath without running the tracing agent.
  *
  * ### Using it without the bindings plugin's CPython conventions
  *
@@ -42,8 +47,12 @@ import org.gradle.api.tasks.TaskAction
  *     packageName.set("my.app.nbody")
  *     objectName.set("Nbody")
  *     outputDirectory.set(layout.buildDirectory.dir("generated/aot/nbody"))
+ *     resourceOutputDirectory.set(layout.buildDirectory.dir("generated/aot-resources/nbody"))
  * }
- * kotlin.sourceSets.named("main") { kotlin.srcDir(generate) }
+ * kotlin.sourceSets.named("main") {
+ *     kotlin.srcDir(generate)
+ *     resources.srcDir(generate.flatMap { it.resourceOutputDirectory })
+ * }
  * ```
  */
 @CacheableTask
@@ -66,16 +75,33 @@ abstract class GenerateAotLibraryBindingsTask : DefaultTask() {
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
+    /**
+     * Optional directory where `META-INF/native-image/<packageName>/<prefix>/reachability-metadata.json` is written.
+     * Add it to a source set's resources (`resources.srcDir(task.flatMap { it.resourceOutputDirectory })`) for GraalVM
+     * native-image builds without a tracing agent.
+     */
+    @get:Optional
+    @get:OutputDirectory
+    abstract val resourceOutputDirectory: DirectoryProperty
+
     @TaskAction
     fun generate() {
         val text = descriptionFile.get().asFile.readText(Charsets.UTF_8)
-        val files = renderAotLibraryBindings(parseAotLibraryDescription(text), packageName.get(), objectName.get())
+        val description = parseAotLibraryDescription(text)
+        val files = renderAotLibraryBindings(description, packageName.get(), objectName.get())
         val root = outputDirectory.get().asFile
         // The directory belongs to this task; a file of an earlier object name must not stay and clash.
         root.deleteRecursively()
         val packageDir = packageName.get().split('.').fold(root) { dir, segment -> dir.resolve(segment) }
         packageDir.mkdirs()
         for ((name, content) in files) packageDir.resolve(name).writeText(content, Charsets.UTF_8)
+        if (resourceOutputDirectory.isPresent) {
+            val resourceRoot = resourceOutputDirectory.get().asFile
+            resourceRoot.deleteRecursively()
+            val metadataFile = resourceRoot.resolve(aotReachabilityMetadataPath(packageName.get(), description.prefix))
+            metadataFile.parentFile.mkdirs()
+            metadataFile.writeText(renderAotReachabilityMetadata(description), Charsets.UTF_8)
+        }
         logger.info("Generated ${files.size} files into $packageDir")
     }
 }

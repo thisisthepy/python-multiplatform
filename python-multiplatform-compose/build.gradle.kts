@@ -40,6 +40,10 @@ kotlin {
     // on publishes `runtime`, `runtime-saveable` and `ui` for both targets.
     macosArm64()
     linuxX64()
+    // Windows (#191, SPEC P-1a): the fork publishes `runtime`, `ui` and the rest for mingwX64 too.
+    mingwX64 {
+        binaries.all { binaryOption("sourceInfoType", "noop") }
+    }
 
     sourceSets {
         commonMain.dependencies {
@@ -48,13 +52,14 @@ kotlin {
             api(compose.ui)
             api(compose.runtimeSaveable)
         }
-        // Same shape as the library's: commonMain -> desktopNativeMain -> {macosArm64Main, linuxX64Main}.
+        // Same shape as the library's: commonMain -> desktopNativeMain -> {macosArm64Main, linuxX64Main, mingwX64Main}.
         // Empty today (the host is all commonMain); it is where K/N-desktop-only host code goes.
         val desktopNativeMain by creating {
             dependsOn(commonMain.get())
         }
         getByName("macosArm64Main").dependsOn(desktopNativeMain)
         getByName("linuxX64Main").dependsOn(desktopNativeMain)
+        getByName("mingwX64Main").dependsOn(desktopNativeMain)
     }
 }
 

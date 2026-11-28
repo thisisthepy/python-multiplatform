@@ -920,9 +920,10 @@ The sample app on both emulators showed:
 
 The last row resumes the parked continuation from a `java.lang.Thread`, as on desktop. (The original record
 adds that `pmp_attach` runs on that path too; a `java.lang.Thread` is already known to ART, so that is
-(unverified).) The iOS sample cannot yet show that row (a Kotlin/Native completion thread needs a
-`Worker` or memory-model decision in the sample; the library's `PythonProxyNativeDeliveryTest` does it with
-`pthread_create`).
+(unverified).) The iOS sample shows that row from a Kotlin/Native `Worker` since #164 item 11 (2026-11-21):
+any thread may resume the parked continuation as long as it holds `withGIL` while it does, and
+`AsyncUpcallWorkerDeliveryTest` proves it for a `Worker` as `PythonProxyNativeDeliveryTest` does for a bare
+`pthread_create` thread. A `kotlinx.coroutines` dispatcher thread is a `Worker` underneath.
 
 **wasmJs**, the synchronous proxy surface runs (10 of `PythonProxyInstallTest`'s 11); `await` does not yet:
 
@@ -959,6 +960,79 @@ adds that `pmp_attach` runs on that path too; a `java.lang.Thread` is already kn
    failure-before-suspend (`AsyncUpcallPortabilityTest`).
 
 ---
+
+### 5.9 The other direction: Kotlin awaiting a Python awaitable (SPEC U-5d)
+
+`suspend fun PyObject.await(): PyObject` (`pythonx/PyAwait.kt`) is U-5a's adapter turned around: the
+same Python submit path (`_submit_suspend_awaitable`, one `_schedule` callback on the loop's FIFO,
+`ensure_future` on the loop thread only), the same completion entry (`PythonCallables.completeSuspendCall`,
+which now resolves either a `PendingSuspendInvocation` or a `PyAwait`), and the same loop order as §5.5.
+What is new is the shape of the Kotlin half and where cancellation comes from.
+
+**Two layers, so the stdlib rule holds and a `Job` can still reach the task.** `PyAwait.submit(awaitable)
+{ result -> }` is a public callback primitive: it submits once, reports once (on the loop thread, inside the
+done callback's upcall frame), and `cancel()` hands one `Task.cancel()` to the loop. `await()` is the
+stdlib `suspendCoroutine` over it. A wrapper that has `kotlinx.coroutines` (pythonx-concurrent) writes
+`suspendCancellableCoroutine { c -> val a = PyAwait.submit(obj) { c.resumeWith(it) }; c.invokeOnCancellation { a.cancel() } }`
+and gets `Job` cancellation to `Task.cancel()` without this library depending on `kotlinx`. The
+stdlib `await()` has one cancellation source, `coroutineContext[PendingCall]`, registered with
+`onCancelled` after a successful submit and disposed at completion (§5.6's seam, U-5a's pattern).
+
+**Exactly once, both ways.** The done callback is the single resume path; `PyAwait.finish` guards it with a
+`done` flag under `PlatformMutex`, releases the handle (generational, so the entry's own release before it
+is a no-op) and only then resumes. `cancel()` flips a `cancelRequested` flag under the same lock before
+touching Python, so the loop receives at most one `_cancel_suspend_on_loop` per await. The FIFO argument of
+U-5a covers a cancel that lands before the task exists (`PyAwaitTest.aCancelThatLandsBeforeTheTaskExists...`
+forces it by parking the loop thread in a callback while the submit and the cancel are queued behind it).
+One case U-5a left parked is closed here: when `_cancel_suspend_awaitable` finds the target loop already
+closed it answers `-1` and drops its map entries, and `PyAwait` completes the await itself with
+`CancellationException`, because nothing on a closed loop runs again. (U-5a's adapter ignores the
+answer and keeps its continuation parked, as before; unchanged in this step.)
+
+**Inside an upcall on the loop thread** nothing blocks: the body suspends, `AsyncUpcall.deliver` returns a
+`Future`, the loop runs the task after the frame returns, the done callback resumes the body on the loop
+thread, and the body's completion settles the `Future` through `call_soon_threadsafe`
+(`PyAwaitTest.awaitingFromInsideAnUpcallOnTheLoopThread...` asserts the `Future` crossed and the value
+arrived). The one way to deadlock, blocking the loop thread until the result is in, is the thing `await()`
+exists to avoid.
+
+**Where the continuation runs.** On the loop thread, holding the GIL, inside a Python callback: the code
+after `await()` blocks the loop while it runs. A `ContinuationInterceptor` in the context moves it off
+(`suspendCoroutine` intercepts; `theContinuationIsDispatchedThroughTheCallersInterceptor...`).
+
+### 5.10 Stepping a Python coroutine from Kotlin (SPEC U-5e)
+
+`PyObject.step(value, context)` and `PyObject.throwInto(exception, context)` (`pythonx/PyCoroutineStep.kt`)
+are the primitive pythonx-concurrent's Kotlin mode (its S7.9) drives a Python coroutine with: one
+`coro.send(value)` or `coro.throw(exc)`, inside `contextvars.Context.run` when the driver names a context,
+as one call that attaches, runs, and detaches. Nothing here uses the table, the binding module or a loop; it
+is the object model plus one exception-mapping helper the trampoline already had.
+
+**Why `Context.run`, and why Kotlin code sits between `Ensure` and `Release` at all.** The request reads
+"no Kotlin code between Ensure and Release"; what it needs is that no *user* code and no suspension point
+sit there (S7.10), so a virtual thread stays pinned for exactly one native call and the GIL is never held
+across a park. `PyIter_Send` would be the single-call shape, but it cannot run under a `Context`, and
+`PyContext_Enter` / `PyContext_Exit` are outside the limited API this library binds. So the scope holds a
+handful of library calls: `GetAttrString(coro, "send")`, a one- or two-element tuple, `PyObject_CallObject`
+on `context.run` or on the bound method, and the classification of the outcome. None of them parks.
+
+**Outcome classification, and the references.** A non-`NULL` result is `Yielded`, a new reference the
+caller owns. `NULL` with `StopIteration` on the indicator is `Returned`: the instance is taken off the
+indicator (`PyErr_GetRaisedException`, new reference), its `value` attribute read (new reference, owned by
+the caller), the instance released. Any other `NULL` is `Raised`, built by `PyException.fromCurrentError`,
+which clears the indicator. The bound method, the `run` attribute and the argument tuple are released in
+`finally`; the argument is incref'd into the tuple (`PyTuple_SetItem` steals) and the caller keeps its own.
+`throwInto(Throwable)` builds the Python exception with `UpcallTrampoline.pythonExceptionObjectFor` (SPEC
+U-2's mapping, the same instance restoration for a `PyException`) and releases it after the step.
+
+**What a driver does with it.** A `Yielded` `asyncio.Future` is subscribed with `call_soon_threadsafe` on
+that future's loop and the Kotlin coroutine suspends on it (S7.9 case 2, the same crossing as S4.5); a
+`Yielded` object of the driver's own (a Kotlin `suspend` call, a channel operation) is awaited in Kotlin;
+anything else is thrown back in with `throwInto(RuntimeError(...))`. A `Raised` whose exception
+`isCancelledError()` is the cancellation signal (`toKotlinException()` gives the `CancellationException`).
+Steps of one coroutine are sequenced by the driver; nothing in the primitive stops a second thread from
+stepping the same coroutine, and CPython answers that with `ValueError: coroutine already executing`, which
+arrives as `Raised`.
 
 ## 6. Cycle collection is part of the table's job
 
@@ -1314,7 +1388,9 @@ Only what is really open; each with what proves the done part.
    `import asyncio` works (`WasmSelectorsImportTest`); the default event loop cannot be built (§5.8). Open
    decision: whether the library ships a selector-free loop. SPEC U-5 `planned` on wasm.
 2. **Kotlin-side forced cancellation.** Structurally impossible without `kotlinx.coroutines`' `Job` tree; only
-   cooperative `ensureActive()` exists (§5.6). Not planned unless that dependency is taken.
+   cooperative `ensureActive()` exists (§5.6). Not planned unless that dependency is taken. The one suspension
+   point this library owns, `PyObject.await()` (§5.9), is the exception: `PendingCall.cancel()` reaches it
+   through `onCancelled` and ends it with `CancellationException` once the task is cancelled.
 3. **A handle left by a dead loop.** The Kotlin `finally` release is meant to cover a loop that stopped before
    its done callback ran; that case was never constructed and observed (unverified).
 4. **Silent exclusions without a KSP warning.** A `suspend` function *type* warns (§5.3); a `suspend fun` with
@@ -1325,8 +1401,8 @@ Only what is really open; each with what proves the done part.
 6. **Kotlin calling a Python override.** Not implemented (§4.4).
 7. **Per-target gaps outside desktop.** U-3/U-4 are asserted on desktop, with smoke coverage elsewhere
    (`NativeSmokeTest`, `GeneratedAndroidTableTest`); the native async tests have no recorded per-test
-   androidNative result (§5.7); no proxy-cost rows for Android/androidNative (§7.5); the iOS sample cannot show
-   the really-suspending demo (§5.8).
+   androidNative result (§5.7); no proxy-cost rows for Android/androidNative (§7.5). The iOS sample now shows the
+   really-suspending demo from a `Worker` (§5.8, #164 item 11).
 8. **`BYTES` marshalling** is per item until `PyBytes_AsStringAndSize` is bound (§3.3).
 9. **Incremental KSP** needs per-file fragments (§2.7). **Transitive and published-artifact discovery** are
    unverified (§2.9).

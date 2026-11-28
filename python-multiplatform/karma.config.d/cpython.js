@@ -31,7 +31,7 @@ const staged = path.resolve(config.basePath, 'kotlin');
 // a second place to keep in step with the CPython build (`cpython.mjs` already reads the version out
 // of the running interpreter to decide where in MEMFS the zip goes).
 const stdlibZip = fs.existsSync(staged)
-    ? fs.readdirSync(staged).find((name) => /^python\d+\.\d+\.zip$/.test(name))
+    ? fs.readdirSync(staged).find((name) => /^python\d+\.\d+t?\.zip$/.test(name))
     : undefined;
 
 const runtimeFiles = ['python.mjs', 'python.wasm', stdlibZip]
@@ -68,3 +68,12 @@ if (stdlibZip) {
 // is paid on every red build. Measured: the `node:fs` break below took 2m07s at 120 s.
 config.browserNoActivityTimeout = 60000;
 config.captureTimeout = 60000;
+
+// SPEC T-8: the free-threaded runtime has a shared memory, which the browser grants only to a
+// cross-origin isolated page, and cpython.mjs refuses to start otherwise. Karma's server sends the
+// two headers on everything it serves (the runner page, its iframe and the scripts), so the test
+// page is isolated. Same-origin subresources need nothing more under require-corp.
+config.customHeaders = (config.customHeaders || []).concat([
+    { match: '.*', name: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+    { match: '.*', name: 'Cross-Origin-Embedder-Policy', value: 'require-corp' },
+]);

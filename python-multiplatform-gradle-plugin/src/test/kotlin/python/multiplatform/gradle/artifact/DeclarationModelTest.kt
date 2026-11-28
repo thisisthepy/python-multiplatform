@@ -133,19 +133,22 @@ class DeclarationModelTest {
      */
     @Test
     fun aDeclinedDeclarationStaysVisibleWithItsReason() {
-        val declined = fixtureDeclarations().single { it.simpleName == "withSuspendCallback" }
+        val declined = fixtureDeclarations().single { it.simpleName == "withSuspendExtensionCallback" }
         assertNull(declined.bindingName, "the binder declined it, and that is the fact being kept")
         val reason = assertNotNull(declined.declineReason)
         assertTrue("suspend" in reason, reason)
-        assertEquals("kotlin.Function1", declined.parameters.single().type.qualifiedName)
+        assertEquals("kotlin.Function2", declined.parameters.single().type.qualifiedName)
 
-        // The half that moved. A plain `() -> Unit` binds now, and the *model* still spells its
-        // parameter with the declared classifier: the signature grammar is the binding's answer
-        // (`ArtifactCallable.paramTypeNames`), not the stub's.
+        // The halves that moved: both a plain `() -> Unit` and a non-extension `suspend () -> Unit`
+        // bind now (SPEC U-5a; #164 item 7).
         val bound = fixtureDeclarations().single { it.simpleName == "withCallback" }
         assertEquals("fixture.artifactvalueclass.withCallback", bound.bindingName)
         assertNull(bound.declineReason)
         assertEquals("kotlin.Function0", bound.parameters.single().type.qualifiedName)
+
+        val boundSuspend = fixtureDeclarations().single { it.simpleName == "withSuspendCallback" }
+        assertEquals("fixture.artifactvalueclass.withSuspendCallback", boundSuspend.bindingName)
+        assertNull(boundSuspend.declineReason)
     }
 
     /** `suspend` is declined by both producers and §3.1 says it must not be stubbed. It is still in

@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream
+import org.apache.tools.ant.util.TeeOutputStream
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import python.multiplatform.gradle.GenerateAotLibraryBindingsTask
@@ -15,7 +17,7 @@ plugins {
 // TypedPython AOT libraries called from Kotlin with no CPython (SPEC N-17, #458)
 // ---------------------------------------------------------------------------------------------
 //
-// Task graph, per library `<p>` (nbody, errors, bigints):
+// Task graph, per library `<p>` (nbody, errors, bigints, dicts):
 //
 //   describe<P>Library   python describe_library.py: the front end and the generator only, writes <p>.json. No C
 //        |               compiler runs. Needs the host Python (pyrefly).
@@ -66,6 +68,12 @@ val aotLibraries = listOf(
         source = file("src/desktopTest/aot/bigints.py"),
         exports = "fill_factorials,make,total,total_of_factorials,raw_sum",
     ),
+    AotLibrarySpec(
+        prefix = "dicts",
+        objectName = "Dicts",
+        source = file("src/desktopTest/aot/dicts.py"),
+        exports = "counts,total,lookup,scaled,evens,same,big",
+    ),
 )
 
 val compilerDir = rootDir.resolve("python-multiplatform-ksp/src/main/python")
@@ -110,6 +118,7 @@ for (lib in aotLibraries) {
         packageName.set("fixture.aot.${lib.prefix}")
         objectName.set(lib.objectName)
         outputDirectory.set(layout.buildDirectory.dir("generated/aot/${lib.prefix}"))
+        resourceOutputDirectory.set(layout.buildDirectory.dir("generated/aot-resources/${lib.prefix}"))
     }
 
     buildTasks += tasks.register<Exec>("build${lib.objectName}Library") {
@@ -150,7 +159,10 @@ kotlin {
             }
             if (skipReason == null) {
                 kotlin.srcDir("src/aotTest/kotlin")
-                generateTasks.forEach { kotlin.srcDir(it) }
+                generateTasks.forEach { task ->
+                    kotlin.srcDir(task)
+                    resources.srcDir(task.flatMap { it.resourceOutputDirectory })
+                }
             } else {
                 kotlin.srcDir("src/skippedTest/kotlin")
             }
@@ -169,6 +181,9 @@ tasks.named<Test>("desktopTest") {
     )
     jvmArgs("--enable-preview", "-Djava.library.path=.")
     environment("PYTHONDONTWRITEBYTECODE", "1")
+    // The thread tests assert with a message that names the slot and the value read; Gradle's short format drops it
+    // and left issue #472 with only a line number. The full format keeps it in the CI log.
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     val reason = skipReason
     if (reason == null) {
         // The library builds link C, so they are a dependency of the test task and of nothing that compiles.
@@ -183,5 +198,120 @@ tasks.named<Test>("desktopTest") {
     } else {
         systemProperty("aot.skip", reason)
         doFirst { logger.warn("AOT library tests will be SKIPPED: $reason") }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// TypedPython AOT libraries in a GraalVM native image (issue #456)
+// ---------------------------------------------------------------------------------------------
+//
+// In Liberica NIK 25 (`native-image --expert-options-all`), `-H:+ForeignAPISupport` is enabled by
+// default (`Default: + (enabled)`), so `--no-fallback` and `--enable-native-access=ALL-UNNAMED` are
+// the only flags needed, plus the generated `META-INF/native-image/<package>/<prefix>/reachability-metadata.json`
+// on the classpath (wired into `desktopTest` resources above). No tracing agent is run.
+
+val aotTestCompilation = kotlin.targets.getByName("desktop").compilations.getByName("test")
+val aotMainCompilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+val aotClasspath = files(
+    aotTestCompilation.output.allOutputs,
+    aotMainCompilation.output.allOutputs,
+    configurations.getByName("desktopTestRuntimeClasspath"),
+)
+val aotJdk25 = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(25))
+    vendor.set(JvmVendorSpec.BELLSOFT)
+}
+val aotMainClass = "fixture.aot.AotNativeImageMainKt"
+val aotNativeDir = layout.buildDirectory.dir("native/aot-fixture")
+
+tasks.register<JavaExec>("aotNativeJvm") {
+    group = "verification"
+    description = "Runs AotNativeImageMain on JDK 25: the 31 scenarios outside JUnit, before a native image is built from it."
+    onlyIf("AOT library: ${skipReason ?: "enabled"}") { skipReason == null }
+    dependsOn(
+        aotTestCompilation.compileTaskProvider,
+        tasks.named("desktopTestProcessResources"),
+        *buildTasks.toTypedArray(),
+    )
+    classpath = aotClasspath
+    mainClass.set(aotMainClass)
+    javaLauncher.set(aotJdk25)
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Djava.library.path=.")
+    environment("PYTHONDONTWRITEBYTECODE", "1")
+    for (lib in aotLibraries) {
+        val dir = layout.buildDirectory.dir("aot/${lib.prefix}")
+        inputs.dir(dir).withPropertyName("${lib.prefix}Library")
+        systemProperty("aot.${lib.prefix}.description", dir.get().file("${lib.prefix}.json").asFile.absolutePath)
+    }
+}
+
+val aotNativeCompile by tasks.registering(Exec::class) {
+    group = "native"
+    description = "Builds the AOT library fixture as a GraalVM native image (build/native/aot-fixture/aot-fixture)."
+    onlyIf("AOT library: ${skipReason ?: "enabled"}") { skipReason == null }
+    dependsOn(
+        aotTestCompilation.compileTaskProvider,
+        tasks.named("desktopTestProcessResources"),
+        *buildTasks.toTypedArray(),
+    )
+    inputs.files(aotClasspath)
+    for (lib in aotLibraries) {
+        inputs.dir(layout.buildDirectory.dir("aot/${lib.prefix}")).withPropertyName("${lib.prefix}Library")
+    }
+    outputs.file(aotNativeDir.map { it.file("aot-fixture") })
+    val launcher = aotJdk25
+    val outDir = aotNativeDir
+    val libDirs = aotLibraries.map { it.prefix to layout.buildDirectory.dir("aot/${it.prefix}") }
+    doFirst { outDir.get().asFile.mkdirs() }
+    executable = launcher.get().metadata.installationPath.asFile.resolve("bin/native-image").absolutePath
+    args(
+        "-cp", aotClasspath.asPath,
+        "--no-fallback",
+        "--enable-native-access=ALL-UNNAMED",
+        "-o", outDir.get().asFile.resolve("aot-fixture").absolutePath,
+        aotMainClass,
+    )
+    doLast {
+        val libsRoot = outDir.get().asFile.resolve("libs")
+        libsRoot.deleteRecursively()
+        for ((prefix, dirProvider) in libDirs) {
+            project.copy {
+                from(dirProvider)
+                into(libsRoot.resolve(prefix))
+            }
+        }
+    }
+}
+
+tasks.register<Exec>("aotNativeRun") {
+    group = "verification"
+    description = "Runs the AOT native image on its own (no JAVA_HOME, no PYTHONHOME) and requires 31 of 31 scenarios to pass and no libjvm or libpython."
+    onlyIf("AOT library: ${skipReason ?: "enabled"}") { skipReason == null }
+    dependsOn(aotNativeCompile)
+    val dir = aotNativeDir
+    workingDir(dir)
+    val binary = dir.get().asFile.resolve("aot-fixture").absolutePath
+    executable = binary
+    environment.remove("JAVA_HOME")
+    environment.remove("PYTHONHOME")
+    val captured = ByteArrayOutputStream()
+    standardOutput = TeeOutputStream(System.out, captured)
+    isIgnoreExitValue = true
+    doLast {
+        val exitCode = executionResult.get().exitValue
+        if (exitCode != 0) throw GradleException("aot-fixture exited with $exitCode")
+        val out = captured.toString()
+        val summary = out.lineSequence().lastOrNull { it.startsWith("AOT_NATIVE_IMAGE:") }
+            ?: throw GradleException("the native image printed no AOT_NATIVE_IMAGE summary")
+        if (summary != "AOT_NATIVE_IMAGE: 31 passed, 0 failed of 31") {
+            throw GradleException("AOT fixture in the native image: $summary")
+        }
+        if ("mac" in System.getProperty("os.name").lowercase()) {
+            val otool = ProcessBuilder("otool", "-L", binary).redirectErrorStream(true).start()
+            val linked = otool.inputStream.bufferedReader().readText().also { otool.waitFor() }
+            if ("libjvm" in linked) throw GradleException("the native image links libjvm:\n$linked")
+            if ("libpython" in linked) throw GradleException("the native image links libpython:\n$linked")
+        }
+        logger.lifecycle("AOT native image: $summary; no libjvm, no libpython")
     }
 }

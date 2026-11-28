@@ -1,5 +1,6 @@
 package python.multiplatform.gradle.artifact
 
+import python.multiplatform.gradle.model.KotlinTypeModel
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -68,11 +69,28 @@ class KlibObjectHandleTest {
         assertEquals("no boundary type for parameter kotlin.coroutines.CoroutineContext", scope.declineReason)
     }
 
+    /**
+     * A bound declaration's types carry no type argument but `kotlin.Any?` (or a star): an unbounded
+     * type parameter is read as `kotlin.Any?` (SPEC B-2, as B-1 on jars, #38), and nothing else is
+     * written into a generic type. This used to assert that no bound declaration carried a generic
+     * type at all, which held only while the klib walker substituted on `@Composable` functions alone
+     * and so declined `mutableStateOf` on Kotlin/Native (#191, batch run 45027744672).
+     */
     @Test
-    fun noBoundDeclarationCarriesAGenericType() {
+    fun aBoundGenericTypeCarriesOnlyKotlinAnyNullableArguments() {
         val bound = declarations.filter { it.bindingName != null }
         assertTrue(bound.isNotEmpty())
+        fun onlyAnyNullable(type: KotlinTypeModel): Boolean = type.arguments.all {
+            it == null || (it.qualifiedName == "kotlin.Any" && it.isNullable && onlyAnyNullable(it))
+        }
         val generic = bound.filter { d -> (d.parameters.map { it.type } + d.returnType).any { it.arguments.isNotEmpty() } }
-        assertEquals(emptyList(), generic.map { it.bindingName })
+        assertTrue(generic.isNotEmpty(), "MutableStateFlow(value: T): MutableStateFlow<T> binds, so something here is generic")
+        // A function-typed parameter's arguments are its lambda's signature (SPEC B-5), not a generic
+        // handle's erased arguments: `Runnable(block: () -> Unit)` carries `kotlin.Unit` (#191).
+        fun isFunctionSlot(type: KotlinTypeModel) = type.qualifiedName.startsWith("kotlin.Function")
+        val other = generic.filter { d ->
+            !(d.parameters.map { it.type }.filterNot(::isFunctionSlot) + d.returnType).all(::onlyAnyNullable)
+        }
+        assertEquals(emptyList(), other.map { it.bindingName })
     }
 }

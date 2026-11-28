@@ -25,9 +25,12 @@ Under the CI sanitizer job (TP_SANITIZE=1) every executable is built with ASan a
 Everything here is an agent proposal, not owner-confirmed.
 """
 import io
+import math
 import os
+import random
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import textwrap
@@ -40,7 +43,7 @@ import pytest
 from typedpython import aot, cbuild
 from typedpython.__main__ import main
 from typedpython.aot import cc
-from aot_text_check import cpython_api_uses
+from aot_text_check import code_only, cpython_api_uses
 
 HEADER = cc.RUNTIME_DIR / "tp_aot.h"
 BENCH = Path(__file__).resolve().parents[4] / "benchmarks" / "typedpython" / "py"
@@ -658,6 +661,7 @@ CASES = {
             print(f"{zero:.9f} {zero:.0f} {zero} {-1e-7:.3f} {1e-7:.9f}")
             print(f"{1e22:.2f} {123456.789:.1f} {2.675:.2f} {0.3:.20f} {1.0 / 3.0:.17f}")
             print(f"{1e300:.2f}")
+            print(f"{1.7976931348623157e308:.2f} {5e-324:.20f} {0.03125:.4f} {0.09375:.4f}")
             print(f"{a * 2.0:.3f} {n < 3} {n * 2}")
             l = [1.5, 2.25]
             print(f"{l[0]:.1f} {l[1]:.1f} {len(l)}")
@@ -788,6 +792,146 @@ def test_case_matches_cpython(merged, name):
 
 def test_float_repr_corpus_is_large_enough(merged):
     assert len(merged.theirs_cases["float_repr_corpus"].splitlines()) > 300
+
+
+# --- exact float formatting harness (#450) ----------------------------------------------------------------
+
+FLOAT_HARNESS = r'''
+#include "tp_aot.h"
+
+int main(void)
+{
+    char line[256];
+    char buf[512];
+    while (fgets(line, sizeof line, stdin) != NULL) {
+        if (line[0] == 'R') {
+            uint64_t bits = (uint64_t)strtoull(line + 2, NULL, 16);
+            double x;
+            int n;
+            memcpy(&x, &bits, sizeof x);
+            n = tpa_repr_f64(x, buf);
+            if (n < 0 || buf[n] != '\0' || (size_t)n != strlen(buf)) {
+                return 2;
+            }
+            fwrite(buf, 1, (size_t)n, stdout);
+            putchar('\n');
+        }
+        else if (line[0] == 'F' || line[0] == 'P') {
+            char *end;
+            int prec = (int)strtol(line + 2, &end, 10);
+            uint64_t bits = (uint64_t)strtoull(end, NULL, 16);
+            double x;
+            memcpy(&x, &bits, sizeof x);
+            if (line[0] == 'F') {
+                int n = tpa_format_f64_fixed(x, prec, buf);
+                if (n < 0 || buf[n] != '\0' || (size_t)n != strlen(buf)) {
+                    return 3;
+                }
+                fwrite(buf, 1, (size_t)n, stdout);
+                putchar('\n');
+            }
+            else {
+                tpa_print_f64_fixed(x, prec);
+                putchar('\n');
+            }
+        }
+    }
+    fflush(stdout);
+    return 0;
+}
+'''
+
+
+@pytest.fixture(scope="module")
+def float_harness(tmp_path_factory):
+    need_cc()
+    tmp = tmp_path_factory.mktemp("float_harness")
+    return cc.compile_executable(FLOAT_HARNESS, tmp / "float_harness")
+
+
+def _f64_hex(x: float) -> str:
+    return f"{struct.unpack('>Q', struct.pack('>d', x))[0]:016x}"
+
+
+def _run_float_harness(exe, lines: list[str]) -> list[str]:
+    run = subprocess.run([str(exe)], input=("\n".join(lines) + "\n").encode("ascii"),
+                         capture_output=True, env=exe_env(), timeout=120)
+    assert run.returncode == 0, text(run.stderr)[-2000:]
+    out = text(run.stdout).split("\n")
+    assert out.pop() == ""
+    assert len(out) == len(lines), (len(out), len(lines))
+    return out
+
+
+def test_float_repr_differential(float_harness):
+    """#450: tpa_repr_f64 matches CPython repr(float) across special values, powers of 2 and 10
+    (with neighbours), known tie cases, and 20,000 random bit patterns."""
+    vals = [
+        0.0, -0.0, float("inf"), float("-inf"), float("nan"), -float("nan"),
+        struct.unpack(">d", struct.pack(">Q", 0x7FF8000000000001))[0],
+        struct.unpack(">d", struct.pack(">Q", 0xFFF8000000000001))[0],
+        struct.unpack(">d", struct.pack(">Q", 0x7FF0000000000001))[0],
+        0.1 + 0.2, 1.0 / 3.0, 2.0 / 3.0, 4.35, 2.675, 1e23, 1e22, 1e21, 5e-324,
+        2.2250738585072014e-308, 2.225073858507201e-308, 1.7976931348623157e308,
+        9007199254740992.0, 9007199254740993.0, 4503599627370496.5,
+    ]
+    for bexp in range(0, 2047):
+        for mant in (0, 1, 2, (1 << 52) - 2, (1 << 52) - 1):
+            x = struct.unpack(">d", struct.pack(">Q", (bexp << 52) | mant))[0]
+            vals.append(x)
+            vals.append(-x)
+    for e in range(-324, 309):
+        for pfx in ("1", "9.999999999999999", "9.999999999999998", "5", "2.5", "1.25", "1.5"):
+            try:
+                x = float(f"{pfx}e{e}")
+                vals.append(x)
+                vals.append(math.nextafter(x, 0.0))
+                vals.append(math.nextafter(x, math.inf))
+            except OverflowError:
+                pass
+    rng = random.Random(20261119)
+    for _ in range(20000):
+        vals.append(struct.unpack(">d", struct.pack(">Q", rng.getrandbits(64)))[0])
+
+    got = _run_float_harness(float_harness, [f"R {_f64_hex(x)}" for x in vals])
+    bad = [(x, g, repr(x)) for x, g in zip(vals, got) if g != repr(x)]
+    assert not bad, f"{len(bad)} of {len(vals)} differ, first: {bad[0]!r}"
+
+
+def test_float_fixed_differential(float_harness):
+    """#450: tpa_format_f64_fixed and tpa_print_f64_fixed match CPython format(x, '.Nf') across
+    special values, dyadic halfways for prec 0..20, extreme exponents, and random floats."""
+    vals = [
+        0.0, -0.0, float("inf"), float("-inf"), float("nan"), -float("nan"),
+        0.5, 1.5, 2.5, 3.5, 4.5, 0.25, 0.75, 0.125, 0.375, 0.625, 0.875,
+        2.675, 4.35, 0.3, 1.0 / 3.0, 0.03125, 0.09375, 1e22, 1e300,
+        1.7976931348623157e308, 5e-324, 2.2250738585072014e-308, 2.225073858507201e-308,
+        9007199254740992.0, 9007199254740993.0, 4503599627370496.5,
+    ]
+    for p in range(21):
+        for m_num in (1, 2, 3, 4, 5, 7, 9, 15, (1 << 52) + 1, (1 << 52) + 3, (1 << 53) - 1):
+            vals.append(math.ldexp(float(m_num), -p - 1))
+            vals.append(math.ldexp(float(m_num), -p - 2))
+            vals.append(math.ldexp(float(m_num), -p))
+            vals.append(-math.ldexp(float(m_num), -p - 1))
+    rng = random.Random(20261120)
+    for _ in range(500):
+        vals.append(struct.unpack(">d", struct.pack(">Q", rng.getrandbits(64)))[0])
+
+    pairs = [(x, p) for x in vals for p in (0, 1, 2, 3, 6, 15, 17, 20)]
+    for x in vals[:100]:
+        for p in range(21):
+            pairs.append((x, p))
+
+    got = _run_float_harness(float_harness, [f"F {p} {_f64_hex(x)}" for x, p in pairs])
+    bad = [(x, p, g, f"{x:.{p}f}") for (x, p), g in zip(pairs, got) if g != f"{x:.{p}f}"]
+    assert not bad, f"{len(bad)} of {len(pairs)} differ, first: {bad[0]!r}"
+
+    # Also exercise tpa_print_f64_fixed directly
+    print_pairs = [(x, p) for x in vals[:32] for p in (0, 1, 2, 3, 17, 20)]
+    got_p = _run_float_harness(float_harness, [f"P {p} {_f64_hex(x)}" for x, p in print_pairs])
+    bad_p = [(x, p, g, f"{x:.{p}f}") for (x, p), g in zip(print_pairs, got_p) if g != f"{x:.{p}f}"]
+    assert not bad_p, f"{len(bad_p)} of {len(print_pairs)} differ in print, first: {bad_p[0]!r}"
 
 
 # --- big integers through compiled code: one program, one build (#462) ----------------------------------------
@@ -2363,38 +2507,32 @@ REJECTED = {
     "import twice": ("import sys\nimport sys\n", ("aot/import", 2, "sys")),
     "from import": ("from math import sqrt\n", ("aot/import", 1, "math")),
     "empty list display": ("def f() -> int:\n    x = []\n    return 0\n", ("aot/container", 2, "list display")),
-    "string variable": ("def f() -> None:\n    s = 'x'\n", ("aot/str", 2, "str")),
-    "f-string as a value": ("def f(x: int) -> None:\n    s = f'{x}'\n", ("aot/f-string", 2, "f-string")),
-    "print keyword": ("def f() -> None:\n    print(1, end='')\n", ("aot/print-keyword", 2, "end")),
+    "str method outside the S1 list": ("def f(s: str) -> str:\n    return s.title()\n", ("aot/call", 2, "s.title")),
+    "printf-style str formatting": ("def f(x: int) -> str:\n    return '%d' % x\n", ("aot/front-end", 2, "f")),
+    "print keyword": ("def f() -> None:\n    print(1, file=None)\n", ("aot/print-keyword", 2, "file")),
     "print as a value": ("def f() -> None:\n    x = print(1)\n", ("aot/print-use", 2, "print")),
-    "class": ("class C:\n    pass\n", ("aot/module-statement", 1, "class")),
+    "class with base": ("class C(int):\n    pass\n", ("aot/class", 1, "C")),
     "unknown builtin": ("def f(x: float) -> int:\n    return round(x)\n", ("aot/builtin", 2, "round")),
-    "int builtin": ("def f(x: float) -> int:\n    return int(x)\n", ("aot/builtin", 2, "int")),
-    "math attribute": ("import math\ndef f() -> float:\n    return math.pi\n", ("aot/attribute", 3, "pi")),
-    "math function": ("import math\ndef f(x: float) -> float:\n    return math.floor(x)\n",
-                      ("aot/math", 3, "math.floor")),
-    "bitwise operator": ("def f(a: int) -> int:\n    return a & 3\n", ("aot/operator", 2, "BitAnd")),
+    "int with base": ("def f() -> int:\n    return int('5', 16)\n", ("aot/builtin", 2, "int")),
+    "math attribute": ("import math\ndef f() -> float:\n    return math.foo\n", ("aot/attribute", 3, "foo")),
+    "math function": ("import math\ndef f(x: float) -> float:\n    return math.gamma(x)\n",
+                      ("aot/math", 3, "math.gamma")),
+    "matmul operator": ("def f(a: int) -> int:\n    return a @ 3\n", ("aot/operator", 2, "MatMult")),
     "decorator": ("@compiled\ndef f() -> None:\n    pass\n", ("aot/decorator", 1, "compiled")),
     "conditional expression of two types": ("def f(a: bool) -> float:\n    return 1 if a else 2.0\n",
                                             ("aot/front-end", 2, "f")),
     "missing annotation": ("def f(a) -> int:\n    return 1\n", ("aot/annotation", 1, "parameter `a`")),
     "list of bool annotation": ("def f(a: list[bool]) -> int:\n    return 1\n", ("aot/type", 1, "list[bool]")),
     "list of lists annotation": ("def f(a: list[list[int]]) -> int:\n    return 1\n", ("aot/type", 1, "list[list[int]]")),
-    "tuple annotation of a parameter": ("def f(a: tuple[int, int]) -> int:\n    return 1\n", ("aot/type", 1, "tuple[int, int]")),
+    "tuple of lists annotation": ("def f(a: tuple[list[int], int]) -> int:\n    return 1\n",
+                                  ("aot/type", 1, "tuple[list[int], int]")),        # (tier S2a: tuples of scalars and str)
     "list in a tuple return": ("def f(a: list[float]) -> tuple[list[float], int]:\n    return a, 1\n",
                                ("aot/type", 1, "tuple[list[float], int]")),
     # the constructs the AOT mode does not have yet, each named
     "list in a list": ("def f() -> int:\n    x = [[1.0]]\n    return 0\n", ("aot/front-end", 2, "f")),
-    "list method": ("def f(a: list[float]) -> None:\n    a.append(1.0)\n", ("aot/call", 2, "a.append")),
-    "list iteration": (
-        "def f(a: list[float]) -> float:\n    s = 0.0\n    for v in a:\n        s += v\n    return s\n",
-        ("aot/statement", 3, "for")),
-    "list slice": ("def f(a: list[float]) -> int:\n    b = a[1:]\n    return 0\n", ("aot/container", 2, "slice")),
+    "list method": ("def f(a: list[float]) -> None:\n    a.sort(cmp=abs)\n", ("aot/keyword", 2, "cmp")),   # (sort: S2c, no cmp=)
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
-    "list printed": ("def f(a: list[float]) -> None:\n    print(a)\n", ("aot/front-end", 2, "f")),
-    "list in an f-string": ("def f(a: list[float]) -> None:\n    print(f'{a}')\n", ("aot/front-end", 2, "f")),
     "list module constant": ("A = [1.0]\n", ("aot/constant", 1, "A")),
-    "list addition": ("def f(a: list[float]) -> int:\n    b = a + a\n    return 0\n", ("aot/front-end", 2, "f")),
     "list passed as an expression": (
         "def g(a: list[float]) -> int:\n    return 0\n\ndef f() -> int:\n    return g([1.0])\n",
         ("aot/front-end", 5, "f")),
@@ -2407,11 +2545,14 @@ REJECTED = {
     "list rebound to a scalar": ("def f() -> None:\n    a = [1.0]\n    a = 2.0\n", ("aot/front-end", 2, "f")),
     "list element arithmetic is strict": (
         "def f(a: list[int]) -> int:\n    return a[0] + 1\n", ("aot/int-unproven", 2, "+")),
-    "tuple display": ("def f() -> int:\n    t = (1, 2)\n    return 0\n", ("aot/container", 2, "tuple display")),
-    "tuple unpack of a display": ("def f() -> int:\n    a, b = 1, 2\n    return 0\n", ("aot/container", 2, "tuple display")),
-    "tuple used as a value": (
-        "def g(x: float) -> tuple[float, float]:\n    return x, x\n\ndef f() -> float:\n    t = g(1.0)\n    return t[0]\n",
-        ("aot/front-end", 5, "f")),
+    # (tier S2a: a tuple local is split into its elements; what has no form without a tuple object is named)
+    "tuple of mixed types indexed by a variable": (
+        "def f(i: int) -> int:\n    t = (i, 'a')\n    return len(str(t[i]))\n", ("aot/front-end", 3, "f")),
+    "tuple identity": ("def f() -> bool:\n    t = (1, 2)\n    return t is t\n", ("aot/front-end", 3, "f")),
+    "tuple stored in a list of lists": (
+        "def f() -> int:\n    t = (1, 2)\n    x = [[t]]\n    return 0\n", ("aot/front-end", 3, "f")),
+    "tuple comparison with a float element": (
+        "def f(a: float) -> bool:\n    t = (a, 1)\n    return t == t\n", ("aot/front-end", 3, "f")),
     "tuple unpacked into the wrong number": (
         "def g(x: float) -> tuple[float, float, float]:\n    return x, x, x\n\ndef f() -> float:\n"
         "    a, b = g(1.0)\n    return a\n", ("aot/front-end", 5, "f")),
@@ -2422,20 +2563,19 @@ REJECTED = {
         "def f(a: list[float]) -> float:\n    x, y = a\n    return x\n", ("aot/front-end", 2, "f")),
     "tuple return of the wrong shape": (
         "def f(x: float) -> tuple[float, int]:\n    return x, x\n", ("aot/front-end", 2, "f")),
-    "sys exit": ("import sys\ndef f() -> None:\n    sys.exit(1)\n", ("aot/call", 3, "sys.exit")),
-    "sys attribute": ("import sys\ndef f() -> int:\n    return sys.maxsize\n", ("aot/attribute", 3, "maxsize")),
-    "sys argv slice": ("import sys\ndef f() -> int:\n    x = sys.argv[1:]\n    return 0\n", ("aot/container", 3, "slice")),
+    "sys attribute": ("import sys\ndef f() -> int:\n    return sys.version\n", ("aot/attribute", 3, "version")),
+    "sys argv slice": ("import sys\ndef f() -> int:\n    x = sys.argv[1:]\n    return 0\n", ("aot/front-end", 3, "f")),
     "int of an argument": ("import sys\ndef f() -> int:\n    return int(sys.argv[1])\n", ("aot/int-unproven", 3, "int")),
     "int of argument zero": ("import sys\ndef f() -> int:\n    return int(sys.argv[0])\n", ("aot/int-unproven", 3, "int")),
-    "sys argv as a string": ("import sys\ndef f() -> None:\n    x = sys.argv[1]\n", ("aot/container", 3, "subscript")),
+    "str identity": ("def f(s: str, t: str) -> bool:\n    return s is t\n", ("aot/front-end", 2, "f")),
     "sys argv with a float index": (
         "import sys\ndef f(x: float) -> int:\n    return int(sys.argv[x])\n", ("aot/front-end", 3, "f")),
-    "int of a string literal": ("def f() -> int:\n    return int('5')\n", ("aot/builtin", 2, "int")),
     "min of three": ("def f(a: float) -> float:\n    return min(a, a, a)\n", ("aot/call", 2, "min")),
     "min of an int and a float": ("def f(a: int, b: float) -> float:\n    return min(a, b)\n", ("aot/front-end", 2, "f")),
     "abs of the most negative int": ("def f(a: int) -> int:\n    return abs(a)\n", ("aot/int-unproven", 2, "-")),
-    "f-string conversion": ("def f(x: float) -> None:\n    print(f'{x!r}')\n", ("aot/f-string", 2, "conversion")),
-    "f-string equals": ("def f(x: float) -> None:\n    print(f'{x=}')\n", ("aot/f-string", 2, "conversion")),
+    "f-string ascii conversion": ("def f(x: float) -> None:\n    print(f'{x!a}')\n", ("aot/f-string", 2, "conversion")),
+    "f-string ascii conversion with equals": ("def f(x: float) -> None:\n    print(f'{x=!a}')\n",
+                                              ("aot/f-string", 2, "conversion")),
     "f-string width": ("def f(x: float) -> None:\n    print(f'{x:8.2f}')\n", ("aot/f-string", 2, "8.2f")),
     "f-string other type": ("def f(x: float) -> None:\n    print(f'{x:e}')\n", ("aot/f-string", 2, "e")),
     "f-string nested field": ("def f(x: float, n: int) -> None:\n    print(f'{x:.{n}f}')\n", ("aot/f-string", 2, "nested field")),
@@ -2473,13 +2613,11 @@ SOURCE_LEVEL_ROWS = frozenset({
     "annotated constant outside 64 bits",
     "annotated constant without a value",
     "annotation outside int float bool",
-    "bitwise operator",
-    "class",
+    "class with base",
     "decorator",
     "empty list display",
-    "f-string as a value",
-    "f-string conversion",
-    "f-string equals",
+    "f-string ascii conversion",
+    "f-string ascii conversion with equals",
     "f-string nested field",
     "f-string other type",
     "f-string precision too large",
@@ -2488,18 +2626,16 @@ SOURCE_LEVEL_ROWS = frozenset({
     "from import",
     "import twice",
     "int annotation on a bool value",
-    "int builtin",
     "int literal outside 64 bits",
-    "int of a string literal",
+    "int with base",
     "list in a tuple return",
-    "list iteration",
     "list method",
     "list module constant",
     "list of bool annotation",
     "list of lists annotation",
-    "list slice",
     "math attribute",
     "math function",
+    "matmul operator",
     "min of three",
     "missing annotation",
     "module constant outside 64 bits",
@@ -2509,14 +2645,9 @@ SOURCE_LEVEL_ROWS = frozenset({
     "print as a value",
     "print keyword",
     "second import",
-    "string variable",
-    "sys argv as a string",
-    "sys argv slice",
+    "str method outside the S1 list",
     "sys attribute",
-    "sys exit",
-    "tuple annotation of a parameter",
-    "tuple display",
-    "tuple unpack of a display",
+    "tuple of lists annotation",
     "unknown builtin",
 })
 # The rows that were refused for an int not proved inside 64 bits before #462. Without strict_int they are accepted
@@ -2575,6 +2706,13 @@ def rejection_groups() -> dict[str, list[str]]:
     return {"source": [n for n in rows if n in SOURCE_LEVEL_ROWS],
             "later": [n for n in rows if n not in SOURCE_LEVEL_ROWS and n not in STRICT_ROWS],
             "strict": [n for n in rows if n in STRICT_ROWS]}
+
+
+def test_every_grouped_row_name_is_a_row():
+    """A renamed row left in a group set silently moves the new row into the wrong merged program (S1b: two
+    source-level rows ran in the later program and hid every later finding)."""
+    for group in (SINGLE_ROWS, SOURCE_LEVEL_ROWS, STRICT_ROWS, IMPORT_ROWS):
+        assert group <= set(REJECTED), sorted(group - set(REJECTED))
 
 
 @pytest.fixture(scope="module")
@@ -2836,9 +2974,24 @@ def test_generated_c_contains_no_cpython(tmp_path):
     big = HEADER.with_name("tp_aot_int.h").read_text()
     assert not cpython_api_uses(big), cpython_api_uses(big)
     for inc in re.findall(r"#include\s*[<\"]([^>\"]+)", c + header + big):
-        # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455)
+        # (stdatomic.h and intrin.h: the library build's atomic list counts, tp_aot.h under -DTPA_LIBRARY, #455;
+        #  time.h and windows.h: tpa_time_* clocks and sleep in tp_aot.h, #476)
         assert inc in {"tp_aot.h", "errno.h", "math.h", "stdint.h", "stdio.h", "stdlib.h", "string.h",
-                       "stdatomic.h", "intrin.h", "sched.h", "stddef.h", "tp_aot_int.h"}, inc
+                       "stdatomic.h", "intrin.h", "sched.h", "stddef.h", "tp_aot_int.h",
+                       "time.h", "windows.h"}, inc
+
+
+def test_tp_aot_has_no_clib_float_formatting():
+    """#450: tp_aot.h does its own exact binary64 decimal formatting without strtod, atof, or
+    printf float conversion specifiers."""
+    header = HEADER.read_text(encoding="utf-8")
+    assert "\u2014" not in header
+    code = code_only(header)
+    for fn in ("strtod", "strtof", "strtold", "atof", "__int128"):
+        assert not re.search(rf"\b{fn}\b", code), fn
+    no_comments = re.sub(r"/\*.*?\*/|//[^\n]*", "", header, flags=re.S)
+    for lit in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', no_comments):
+        assert not re.search(r"%[0-9.*+\-# ']*[efgEFGaA]", lit), lit
 
 
 def test_generated_c_uses_the_default_modes_float_flags():

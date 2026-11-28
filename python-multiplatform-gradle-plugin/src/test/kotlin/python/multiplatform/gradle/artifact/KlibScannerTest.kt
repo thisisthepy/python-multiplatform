@@ -68,8 +68,7 @@ class KlibScannerTest {
     @Test
     fun aPackageAnIncludePrefixNamesExactlyIsMatchedNotOnlyItsSubPackages() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         assertTrue(entries.isNotEmpty(), "kotlin.math yielded nothing; the package-prefix match regressed")
@@ -89,8 +88,7 @@ class KlibScannerTest {
     @Test
     fun overloadedNamesAreSuffixedNotDropped() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val names = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math")).map { it.name }
         assertEquals(
@@ -108,8 +106,7 @@ class KlibScannerTest {
     @Test
     fun anEntryCarriesTheTagsItsDeclarationImplies() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         val absInt = entries.single { it.name == "kotlin.math.abs__Int" }
@@ -147,11 +144,33 @@ class KlibScannerTest {
         // of its interfaces and classes, and since #191 Phase B (A1) `.knm` metadata adds top-level
         // constants, extension functions/properties on handle receivers, and public members of open
         // and abstract classes while declining `@Deprecated(level = ERROR)` types (`ChildHandle`,
-        // `ChildJob`).
+        // `ChildJob`). Since SPEC U-4a (#164) the members of a public generic class or interface with
+        // unbounded type parameters bind too, each read as `kotlin.Any?` (`Deferred.getCompleted`,
+        // `MutableStateFlow.value`, `CancellableContinuation.isActive`); a member whose signature names a
+        // parameterized type (`Deferred.onAwait: SelectClause1<T>`) and a member of a generic value class
+        // (`ChannelResult<T>.isSuccess`) stay declined. Since #191 (batch run 45027744672) a top-level
+        // function with unbounded type parameters binds whether `@Composable` or not, each read as
+        // `kotlin.Any?` (`MutableStateFlow`, `CompletableDeferred`, `flowOf`, `stateIn`), and a
+        // `kotlin.Any?` slot crosses as a handle (`Mutex.lock(owner)`), and so does a star-projected handle
+        // type (`CancellableContinuation<*>.disposeOnCancellation`), and a `String?` parameter
+        // (`ClosedReceiveChannelException(message)`), all as on jars (B-1, #38). Since #191 (K/N parity) a
+        // function-typed parameter takes a Python callable on a non-`@Composable` declaration too (B-5):
+        // `Runnable(block)`, `Channel(onUndeliveredElement)`, `consume`, `update`, `getAndUpdate`, `updateAndGet`,
+        // `distinctUntilChangedBy`, and the lambda overloads of
+        // `debounce` and `distinctUntilChanged`, which now share their base name with a suffix (U-8).
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
         assertEquals(
             listOf(
+                "kotlinx.coroutines.AbstractCoroutine.isActive",
+                "kotlinx.coroutines.CancellableContinuation.initCancellability",
+                "kotlinx.coroutines.CancellableContinuation.isActive",
+                "kotlinx.coroutines.CancellableContinuation.isCancelled",
+                "kotlinx.coroutines.CancellableContinuation.isCompleted",
+                "kotlinx.coroutines.CancellableContinuation.tryResume",
                 "kotlinx.coroutines.CloseableCoroutineDispatcher.close",
+                "kotlinx.coroutines.CompletableDeferred.complete",
+                "kotlinx.coroutines.CompletableDeferred__Any",
+                "kotlinx.coroutines.CompletableDeferred__Job",
                 "kotlinx.coroutines.CompletableJob.complete",
                 "kotlinx.coroutines.CoroutineDispatcher.Key",
                 "kotlinx.coroutines.CoroutineDispatcher.limitedParallelism",
@@ -160,6 +179,8 @@ class KlibScannerTest {
                 "kotlinx.coroutines.CoroutineName.Key",
                 "kotlinx.coroutines.CoroutineName.name",
                 "kotlinx.coroutines.CoroutineStart.isLazy",
+                "kotlinx.coroutines.Deferred.await",
+                "kotlinx.coroutines.Deferred.getCompleted",
                 "kotlinx.coroutines.Dispatchers.Default",
                 "kotlinx.coroutines.Dispatchers.Main",
                 "kotlinx.coroutines.Dispatchers.Unconfined",
@@ -170,6 +191,7 @@ class KlibScannerTest {
                 "kotlinx.coroutines.Job.isActive",
                 "kotlinx.coroutines.Job.isCancelled",
                 "kotlinx.coroutines.Job.isCompleted",
+                "kotlinx.coroutines.Job.join",
                 "kotlinx.coroutines.Job.onJoin",
                 "kotlinx.coroutines.Job.parent",
                 "kotlinx.coroutines.Job.start",
@@ -178,30 +200,83 @@ class KlibScannerTest {
                 "kotlinx.coroutines.MainScope",
                 "kotlinx.coroutines.NonDisposableHandle.dispose",
                 "kotlinx.coroutines.NonDisposableHandle.parent",
+                "kotlinx.coroutines.Runnable",
                 "kotlinx.coroutines.Runnable.run",
                 "kotlinx.coroutines.SupervisorJob",
                 "kotlinx.coroutines.TimeoutCancellationException.createCopy",
+                "kotlinx.coroutines.channels.Channel",
                 "kotlinx.coroutines.channels.Channel.Factory",
                 "kotlinx.coroutines.channels.Channel.Factory.BUFFERED",
                 "kotlinx.coroutines.channels.Channel.Factory.CONFLATED",
                 "kotlinx.coroutines.channels.Channel.Factory.DEFAULT_BUFFER_PROPERTY_NAME",
                 "kotlinx.coroutines.channels.Channel.Factory.RENDEZVOUS",
                 "kotlinx.coroutines.channels.Channel.Factory.UNLIMITED",
+                "kotlinx.coroutines.channels.ChannelIterator.hasNext",
+                "kotlinx.coroutines.channels.ChannelIterator.next",
                 "kotlinx.coroutines.channels.ChannelResult.Companion",
+                "kotlinx.coroutines.channels.ClosedReceiveChannelException",
+                "kotlinx.coroutines.channels.ClosedSendChannelException",
+                "kotlinx.coroutines.channels.ReceiveChannel.isClosedForReceive",
+                "kotlinx.coroutines.channels.ReceiveChannel.isEmpty",
+                "kotlinx.coroutines.channels.ReceiveChannel.receive",
+                "kotlinx.coroutines.channels.SendChannel.isClosedForSend",
+                "kotlinx.coroutines.channels.SendChannel.send",
+                "kotlinx.coroutines.channels.consume",
+                "kotlinx.coroutines.disposeOnCancellation",
                 "kotlinx.coroutines.ensureActive__CoroutineScope",
                 "kotlinx.coroutines.ensureActive__Job",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY",
                 "kotlinx.coroutines.flow.DEFAULT_CONCURRENCY_PROPERTY_NAME",
+                "kotlinx.coroutines.flow.FlowCollector.emit",
+                "kotlinx.coroutines.flow.MutableSharedFlow",
+                "kotlinx.coroutines.flow.MutableSharedFlow.emit",
+                "kotlinx.coroutines.flow.MutableSharedFlow.resetReplayCache",
+                "kotlinx.coroutines.flow.MutableSharedFlow.tryEmit",
+                "kotlinx.coroutines.flow.MutableStateFlow",
+                "kotlinx.coroutines.flow.MutableStateFlow.compareAndSet",
+                "kotlinx.coroutines.flow.MutableStateFlow.value",
+                "kotlinx.coroutines.flow.MutableStateFlow.value=",
                 "kotlinx.coroutines.flow.SharingStarted.Companion",
                 "kotlinx.coroutines.flow.SharingStarted.Eagerly",
                 "kotlinx.coroutines.flow.SharingStarted.Lazily",
                 "kotlinx.coroutines.flow.SharingStarted.WhileSubscribed",
+                "kotlinx.coroutines.flow.StateFlow.value",
+                "kotlinx.coroutines.flow.asSharedFlow",
+                "kotlinx.coroutines.flow.asStateFlow",
+                "kotlinx.coroutines.flow.buffer",
+                "kotlinx.coroutines.flow.cancellable",
+                "kotlinx.coroutines.flow.conflate",
+                "kotlinx.coroutines.flow.consumeAsFlow",
+                "kotlinx.coroutines.flow.debounce__kotlinx_coroutines_flow_Flow_kotlin_Function1_kotlin_Any___kotlin_Long",
+                "kotlinx.coroutines.flow.debounce__kotlinx_coroutines_flow_Flow_kotlin_Long",
+                "kotlinx.coroutines.flow.distinctUntilChangedBy",
+                "kotlinx.coroutines.flow.distinctUntilChanged__0",
+                "kotlinx.coroutines.flow.distinctUntilChanged__Boolean",
+                "kotlinx.coroutines.flow.drop",
+                "kotlinx.coroutines.flow.emptyFlow",
+                "kotlinx.coroutines.flow.flowOf",
+                "kotlinx.coroutines.flow.getAndUpdate",
+                "kotlinx.coroutines.flow.launchIn",
+                "kotlinx.coroutines.flow.produceIn",
+                "kotlinx.coroutines.flow.receiveAsFlow",
+                "kotlinx.coroutines.flow.sample",
+                "kotlinx.coroutines.flow.shareIn",
+                "kotlinx.coroutines.flow.stateIn",
+                "kotlinx.coroutines.flow.take",
+                "kotlinx.coroutines.flow.update",
+                "kotlinx.coroutines.flow.updateAndGet",
                 "kotlinx.coroutines.isActive",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
+                "kotlinx.coroutines.selects.SelectInstance.disposeOnCompletion",
+                "kotlinx.coroutines.selects.SelectInstance.selectInRegistrationPhase",
                 "kotlinx.coroutines.sync.Mutex",
                 "kotlinx.coroutines.sync.Mutex.isLocked",
+                "kotlinx.coroutines.sync.Mutex.lock",
+                "kotlinx.coroutines.sync.Mutex.tryLock",
+                "kotlinx.coroutines.sync.Mutex.unlock",
                 "kotlinx.coroutines.sync.Semaphore",
+                "kotlinx.coroutines.sync.Semaphore.acquire",
                 "kotlinx.coroutines.sync.Semaphore.availablePermits",
                 "kotlinx.coroutines.sync.Semaphore.release",
                 "kotlinx.coroutines.sync.Semaphore.tryAcquire",
@@ -234,8 +309,7 @@ class KlibScannerTest {
     @Test
     fun anIncludePrefixIsANamespaceNotATextPrefix() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val entries = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.co"))
         assertEquals(emptyList(), entries, "\"kotlin.co\" is a text prefix of real packages but not their namespace")
@@ -255,8 +329,7 @@ class KlibScannerTest {
     @Test
     fun aDeclinedDeclarationIsRecordedWithItsReasonRatherThanVanishing() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
         val bound = declarations.filter { it.bindingName != null }
@@ -287,8 +360,7 @@ class KlibScannerTest {
     @Test
     fun theModelAndTheBindingsAgreeBecauseTheyComeFromTheSameWalk() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val bound = KlibScanner.scanKlib(konanStdlibKlib, includePrefixes = listOf("kotlin.math")).map { it.name }
         val modelled = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
@@ -306,8 +378,7 @@ class KlibScannerTest {
     @Test
     fun theSharedOverloadRuleReachesTheModelsBindingName() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val max = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
             .filter { it.simpleName == "max" && it.bindingName != null }
@@ -333,8 +404,7 @@ class KlibScannerTest {
     @Test
     fun aKlibSuppliesTypesAndDefaultsAndParameterNamesViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val absInt = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = listOf("kotlin.math"))
             .single { it.bindingName == "kotlin.math.abs__Int" }
@@ -349,33 +419,39 @@ class KlibScannerTest {
     }
 
     /**
-     * A nullable primitive is declined, the same rule `resolveKotlinType` applies to the JVM
+     * A nullable number or `Boolean` is declined, the same rule `resolveKotlinType` applies to the JVM
      * producer's `Int?` -- and for the same reason: `TypeTag.INT` carries a `Long` and the generated
      * read is `(args[0] as Long).toInt()`, so a Python `None` would fail inside the cast rather than
      * reach the declaration.
      *
      * This is not a rule the klib walker used to have. `AbiType.Simple.nullability` exists on 2.0.20
      * and the first version of this file never read it, so `String?` mapped to `STRING` and would have
-     * generated `(args[0] as String)` for a parameter that accepts null.
+     * generated `(args[0] as String)` for a parameter that accepts null. A nullable `String` or
+     * `ByteArray` now binds with `(args[0] as String?)`, as the jar walker's
+     * `nullablePrimitiveBoundaryTypeOf` does (#191: material3's `Icon(contentDescription: String?)`),
+     * so they are left out of this probe; `KlibGenericFunctionTest.aNullableStringParameterCrossesAsAString`
+     * pins the cast.
      */
     @Test
-    fun aNullablePrimitiveIsDeclinedTheWayTheJvmProducerDeclinesOne() {
+    fun aNullableNumberOrBooleanIsDeclinedTheWayTheJvmProducerDeclinesOne() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = NULLABLE_PROBE_PACKAGES)
         val nullablePrimitiveTyped = declarations.filter { declaration ->
-            declaration.parameters.any { it.type.isNullable && it.type.qualifiedName in KLIB_PRIMITIVE_NAMES }
+            declaration.parameters.any {
+                it.type.isNullable && it.type.qualifiedName in KLIB_PRIMITIVE_NAMES &&
+                    it.type.qualifiedName != "kotlin.String" && it.type.qualifiedName != "kotlin.ByteArray"
+            }
         }
         assertTrue(
             nullablePrimitiveTyped.isNotEmpty(),
-            "no declaration in $NULLABLE_PROBE_PACKAGES has a nullable primitive parameter; " +
+            "no declaration in $NULLABLE_PROBE_PACKAGES has a nullable number or Boolean parameter; " +
                 "this test's fixture assumption is wrong, not the rule",
         )
         assertTrue(
             nullablePrimitiveTyped.all { it.bindingName == null },
-            "bound with a nullable primitive: ${nullablePrimitiveTyped.filter { it.bindingName != null }.map { it.bindingName }}",
+            "bound with a nullable number or Boolean: ${nullablePrimitiveTyped.filter { it.bindingName != null }.map { it.bindingName }}",
         )
     }
 
@@ -398,8 +474,7 @@ class KlibScannerTest {
     @Test
     fun boundDeclarationsWithDefaultsOccurInRealKlibsViaKnm() {
         if (!konanStdlibKlib.isDirectory) {
-            println("skipped: no .konan cache at $konanStdlibKlib")
-            return
+            ExternalArtifacts.skip("no .konan cache at $konanStdlibKlib")
         }
         val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = emptyList())
         val boundWithDefault = declarations.filter { it.bindingName != null && it.parameters.any { p -> p.declaresDefault } }

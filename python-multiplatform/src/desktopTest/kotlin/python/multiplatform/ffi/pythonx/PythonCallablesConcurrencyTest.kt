@@ -135,7 +135,8 @@ class PythonCallablesConcurrencyTest {
             seen = PythonCallables.current
             count = PythonCallables.openScopeCount
             try {
-                PythonCallables.newFunction(PyInt.from(1L), 0, false, "", "k")
+                // Arity 1: a `Runnable` / `() -> Unit` with no scope is B-5c's one-shot, not a refusal.
+                PythonCallables.newFunction(PyInt.from(1L), 1, false, "INT", "k")
             } catch (t: Throwable) {
                 failure = t
             }

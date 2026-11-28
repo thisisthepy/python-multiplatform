@@ -22,7 +22,7 @@ exactly. An `int` RESULT (also an element of a tuple) that the function holds th
 check: when it does not fit int64 the call fails with -1 and the error record `OverflowError` with the fixed message
 "the int result of `<function>` does not fit in 64 bits". That check belongs to this ABI and has no counterpart in the
 source language (like the null-handle TypeError); the generated header says so. A library whose ints are all proved
-inside 64 bits generates the C text, the header and the JSON it did, except that `abi_version` is 2 (and the comment
+inside 64 bits generates the C text, the header and the JSON it did, except that `abi_version` is 3 (and the comment
 at the top of the C text says so).
 
 Lists of big ints (#465, ABI version 2; the static classification and the new list kind: leader decision 2026-11-16,
@@ -45,6 +45,25 @@ range" for `set`). `get` of an element that does not fit int64 is the ABI-level 
 does not fit in 64 bits" (no value is written; the same element reads fine after a `set` of a smaller value); like the
 int result check above it has no counterpart in the source language, and the header says so.
 
+Dicts (#443, tier S2b, ABI version 3; agent proposal, not owner-confirmed, the leader decides the shape). A `dict[int, int]`,
+`dict[int, float]` or `dict[int, bool]` parameter or result is the opaque counted handle `dict_i64_i64`, `dict_i64_f64` or
+`dict_i64_bool` (the runtime's `tpa_dict`, whose int keys and values are always big-capable inside, so one Python type has one
+form and there is no raw / big split as for lists). Each kind a signature uses has these functions:
+
+  <p>_<k> *<p>_<k>_new(void)                                   an empty dict; clears the error record
+  int <p>_<k>_set(<p>_<k> *d, int64_t key, V value)            d[key] = value
+  int <p>_<k>_get(const <p>_<k> *d, int64_t key, V *out)       d[key]; KeyError(key) when absent
+  int <p>_<k>_contains(const <p>_<k> *d, int64_t key)          1 or 0
+  int <p>_<k>_next(const <p>_<k> *d, int64_t *pos, int64_t *key, V *value)   the items in order from *pos = 0: 1, 0 at the end
+  int64_t <p>_<k>_len(const <p>_<k> *d), void _retain, void _release
+
+with V int64_t, double or uint8_t. A key or value outside 64 bits cannot be read: `_get` and `_next` fail with the ABI-level
+OverflowError "the key of the dict does not fit in 64 bits" / "the value of the dict does not fit in 64 bits" (`_next` has
+moved past that item). A NULL handle is the TypeError "argument 'd' is a null dict handle". The library never writes a dict
+parameter of an export (`aot/library-dict-write`, checked through the callees it is passed to, see `dict_read_only`), so one
+handle may be read by calls on several threads at once; the caller builds a dict with `_new` and `_set` before sharing it.
+Other dicts (str, bool or tuple keys; str, dict or set values; sets; lists of dicts) do not cross the boundary yet.
+
 The exported ABI (every name is `<prefix>_...`; C linkage; default visibility, everything else hidden):
 
   int <p>_<f>(<params>, <out pointers>)        one per export; 0 on success, -1 on failure
@@ -53,16 +72,18 @@ The exported ABI (every name is `<prefix>_...`; C linkage; default visibility, e
   int <p>_last_error(const char **class_name, const char **message)
   <p>_f64_list / <p>_i64_list: _new, _len, _data, _retain, _release
   <p>_int_list: _new, _len, _get, _set, _retain, _release      (only in a library whose signatures use it)
+  <p>_dict_i64_<v>: _new, _set, _get, _contains, _next, _len, _retain, _release   (only the kinds the signatures use)
 
 with the types `i64` (int64_t), `f64` (double), `bool` (uint8_t, a value other than 0 or 1 is read as true) and the
-opaque counted list handles `f64_list`, `i64_list` and `int_list`.
+opaque counted handles `f64_list`, `i64_list`, `int_list`, `dict_i64_i64`, `dict_i64_f64` and `dict_i64_bool`.
 
 The description file `<prefix>.json` (the input of the Kotlin generator; the keys and the vocabulary are stable
-while "abi_version" is 2; version 2 only added the type `int_list` and its entry under "lists"):
+while "abi_version" is 3; version 2 added the type `int_list` and its entry under "lists", version 3 the dict types and
+"dicts"):
 
   {"prefix": "<p>",
    "library": "<file name of the shared library on the platform that built it>",
-   "abi_version": 2,
+   "abi_version": 3,
    "runtime": {"init": "<p>_init", "shutdown": "<p>_shutdown", "last_error": "<p>_last_error"},
    "functions": [{"name": "<python name>", "symbol": "<p>_<name>", "line": <line of the def>,
                   "params": [{"name": "<python name>", "type": "<type>"}, ...],
@@ -71,11 +92,13 @@ while "abi_version" is 2; version 2 only added the type `int_list` and its entry
                           "release": "..."},
              "i64_list": {"element": "i64", ...},
              "int_list": {"element": "i64", "new": "...", "len": "...", "get": "...", "set": "...", "retain": "...",
-                          "release": "..."}}}
+                          "release": "..."}},
+   "dicts": {"dict_i64_f64": {"key": "i64", "value": "f64", "new": "...", "set": "...", "get": "...", "contains": "...",
+                              "next": "...", "len": "...", "retain": "...", "release": "..."}, ...}}
 
-"lists" has the "int_list" entry (with "get" and "set" and no "data") only when a signature of the library uses that
+"dicts" is there only when a signature uses a dict, with one entry per kind used. "lists" has the "int_list" entry (with "get" and "set" and no "data") only when a signature of the library uses that
 type; a library with no big-capable list at its boundary has the JSON it had under version 1 except `abi_version`.
-`<type>` is one of `i64`, `f64`, `bool`, `f64_list`, `i64_list`, `int_list` (`VOCABULARY`). "returns" is the list of out
+`<type>` is one of `VOCABULARY`. "returns" is the list of out
 pointers after the parameters, in order: empty for a function that returns None, one element for an int, a
 float, a bool or a list, one per element for a fixed tuple. The C signature follows from it: a `<type>` in
 params is passed by value (a list as the handle), a `<type>` in returns is an out pointer to that type (to the
@@ -90,23 +113,29 @@ import re
 import sys
 from pathlib import Path
 
-from typedpython import ir, resume
+from typedpython import ir, resume, tuples
 from typedpython.aot import AotError, LibraryFiles, _lower
 from typedpython.aot import emit as emit_mod
+from typedpython.aot import unicode as unicode_mod
 from typedpython.aot.emit import CTYPE, LIST, mangle
-from typedpython.aot.program import analyze
+from typedpython.aot.program import _is_class_annotation, analyze
 from typedpython.aotcheck import Finding
 from typedpython.ir import Type
 
-ABI_VERSION = 2
-VOCABULARY = ("i64", "f64", "bool", "f64_list", "i64_list", "int_list")
+ABI_VERSION = 3
+VOCABULARY = ("i64", "f64", "bool", "f64_list", "i64_list", "int_list", "dict_i64_i64", "dict_i64_f64", "dict_i64_bool")
 _TYPE_NAME = {Type.I64: "i64", Type.F64: "f64", Type.BOOL: "bool", Type.F64_ARRAY: "f64_list",
               Type.I64_ARRAY: "i64_list"}
 _C_TYPE = {"i64": "int64_t", "f64": "double", "bool": "uint8_t"}
+_PY_NAME = {"i64": "int", "f64": "float", "bool": "bool"}
 _ANN_TYPE = {"int": "i64", "float": "f64", "bool": "bool"}
 _LIST_ELEMENT = {"f64_list": "f64", "i64_list": "i64", "int_list": "int"}      # the runtime's name: tpa_<x>_list
-_RESERVED_EXPORTS = frozenset({"init", "shutdown", "last_error", "f64_list", "i64_list", "int_list"})
-_RESERVED_EXPORT_PREFIXES = ("f64_list_", "i64_list_", "int_list_")
+# tier S2b (ABI version 3): the dicts that cross the boundary, `dict[int, V]`: the value's boundary type and runtime kind
+_DICT_KINDS = {"dict_i64_i64": ("i64", "TPA_DV_INT"), "dict_i64_f64": ("f64", "TPA_DV_F64"),
+               "dict_i64_bool": ("bool", "TPA_DV_BOOL")}
+_HANDLE = (*_LIST_ELEMENT, *_DICT_KINDS)             # the types passed as an opaque counted handle
+_RESERVED_EXPORTS = frozenset({"init", "shutdown", "last_error", "f64_list", "i64_list", "int_list", *_DICT_KINDS})
+_RESERVED_EXPORT_PREFIXES = ("f64_list_", "i64_list_", "int_list_", *(f"{k}_" for k in _DICT_KINDS))
 _RESERVED_PREFIXES = ("tpa", "tpf", "tp")       # the runtime's own names (`tpa_...`, `tpf_...`, `tp_cleanup`)
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -121,6 +150,100 @@ def library_file_name(prefix: str) -> str:
 
 
 # --- the names and the exports ---------------------------------------------------------------------
+
+def _boundary_dict(kinds) -> bool:
+    """`dict[int, int | float | bool]`: the dicts of ABI version 3 (str, bool and tuple keys, str, dict and set values wait)."""
+    return (isinstance(kinds, tuple) and len(kinds) == 2 and kinds[0] is Type.I64
+            and kinds[1] in (Type.I64, Type.F64, Type.BOOL))
+
+
+# --- tier S2b: the library never writes a dict that crossed its boundary --------------------------------------------
+#
+# A dict parameter of an export may be shared by several threads (the caller passes one handle to calls on several
+# threads), and the runtime's dict has no lock (per-object locking is tier T, as for aot/library-resize and
+# aot/library-mutable-class). So an exported function may only READ a dict parameter: the parameter may appear only as
+# the dict of a read (below), as an argument for a parameter of a callee that is read-only by the same rule, and, in the
+# exported function itself, as its return value (the same handle goes back to the caller; a callee that returns its
+# parameter hands its caller an alias, so there it is not read-only). Every other use (a store, del, a method that
+# changes the dict, an assignment to another name, a display or a field that holds it, a node this list does not name)
+# is a write. What this criterion cannot see: nothing, by construction; it can refuse a function that does not write
+# (a parameter rebound to a new dict and then written, a use in a node added later), which is the safe side.
+
+_DICT_READS = {
+    (ir.DictGet, "dict"), (ir.DictContains, "dict"), (ir.DictLen, "dict"), (ir.DictCompare, "left"),
+    (ir.DictCompare, "right"), (ir.DictStr, "value"), (ir.ForDict, "value"), (ir.DictHasValue, "dict"),
+    (ir.DictHasItem, "dict"), (ir.DictViewStr, "dict"), (ir.DictView, "dict"), (ir.DictCopy, "value"), (ir.DictUpdate, "other"),
+}
+_DICT_WRITE_WORDS = {
+    ir.DictStore: "a store", ir.DictDelete: "del", ir.DictPop: "pop()", ir.DictPopItem: "popitem()",
+    ir.DictSetDefault: "setdefault()", ir.DictClear: "clear()", ir.DictUpdate: "update()", ir.Assign: "an assignment",
+    ir.DictListDisplay: "a list that holds it", ir.FieldSet: "a field that holds it",
+}
+
+
+def _uses(node, parent=None, field_name=None):
+    """`(parent, field, node)` for every IR node under `node`, the field of the parent it is in."""
+    yield parent, field_name, node
+    for fl in dataclasses.fields(node):
+        v = getattr(node, fl.name)
+        for x in (v if isinstance(v, tuple) else (v,)):
+            if isinstance(x, (ir.Expr, ir.Stmt)):
+                yield from _uses(x, node, fl.name)
+
+
+def _dict_params(fn: ir.Function) -> list[tuple[int, str]]:
+    return [(i, q.name) for i, q in enumerate(fn.params) if isinstance(q, ir.Param) and q.type is Type.DICT]
+
+
+def _first_write(fn: ir.Function, name: str, ro: dict, export: bool) -> str | None:
+    """How `fn` writes its dict parameter `name` (None when it only reads it)."""
+    for s in fn.body:
+        for parent, fl, n in _uses(s):
+            if not (isinstance(n, ir.Local) and n.name == name):
+                continue
+            if (type(parent), fl) in _DICT_READS:
+                continue
+            if export and isinstance(parent, ir.Return):
+                continue
+            if isinstance(parent, ir.Call):
+                i = next(j for j, a in enumerate(parent.args) if a is n)
+                if ro.get((parent.function, i), False):
+                    continue
+                return f"passed to `{parent.function}`, which writes it"
+            return _DICT_WRITE_WORDS.get(type(parent), "a use other than a read")
+        for parent, fl, n in _uses(s):
+            if isinstance(n, ir.Assign) and n.target == name:
+                return "an assignment to it"
+    return None
+
+
+def dict_read_only(proved: ir.Module, names: set[str]) -> dict[tuple[str, int], bool]:
+    """`(function, parameter index) -> True` for each dict parameter that the function and its callees only read (the
+    greatest fixpoint: a recursive call of a read-only parameter is read-only)."""
+    fns = {f.name: f for f in proved.functions if f.name in names}
+    ro = {(f.name, i): True for f in fns.values() for i, _ in _dict_params(f)}
+    changed = True
+    while changed:
+        changed = False
+        for f in fns.values():
+            for i, p in _dict_params(f):
+                if ro[(f.name, i)] and _first_write(f, p, ro, export=False) is not None:
+                    ro[(f.name, i)] = False
+                    changed = True
+    return ro
+
+
+def dict_write_findings(proved: ir.Module, fn: ir.Function, rel: str, line: int, ro: dict) -> list[Finding]:
+    out = []
+    for _, p in _dict_params(fn):
+        how = _first_write(fn, p, ro, export=True)
+        if how is not None:
+            out.append(_finding(rel, line, "aot/library-dict-write", fn.name,
+                                f"`{fn.name}` cannot be exported: it writes its dict parameter `{p}` ({how}); the library "
+                                "never writes a dict that crosses its boundary until tier T adds per-dict locking "
+                                "(another thread may be reading the same dict)", fn.name))
+    return out
+
 
 def _finding(rel: str, line: int, rule: str, name: str, message: str, function: str | None = None) -> Finding:
     return Finding(rel, line, "error", None, rule, name, message, function)
@@ -137,12 +260,18 @@ def prefix_findings(prefix: str, rel: str) -> list[Finding]:
 
 
 def _scalar_or_list(ann: ast.expr | None) -> str | None:
-    """`int`, `float`, `bool`, `list[int]`, `list[float]` as the vocabulary names; None for anything else."""
+    """`int`, `float`, `bool`, `list[int]`, `list[float]`, `dict[int, int | float | bool]` as the vocabulary names; None for
+    anything else."""
     if isinstance(ann, ast.Name) and ann.id in _ANN_TYPE:
         return _ANN_TYPE[ann.id]
     if (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "list"
             and isinstance(ann.slice, ast.Name) and ann.slice.id in ("int", "float")):
         return "i64_list" if ann.slice.id == "int" else "f64_list"
+    if (isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "dict"
+            and isinstance(ann.slice, ast.Tuple) and len(ann.slice.elts) == 2
+            and all(isinstance(e, ast.Name) for e in ann.slice.elts)
+            and ann.slice.elts[0].id == "int" and ann.slice.elts[1].id in _ANN_TYPE):      # type: ignore[attr-defined]
+        return f"dict_i64_{_ANN_TYPE[ann.slice.elts[1].id]}"                            # type: ignore[attr-defined]
     return None
 
 
@@ -189,22 +318,34 @@ def export_findings(program, exports: list[str]) -> tuple[list[Finding], dict[st
                 or name.startswith(_RESERVED_EXPORT_PREFIXES)):
             found.append(_finding(rel, fn.lineno, "aot/export", name, f"`{name}` cannot be exported: its C symbol "
                                   "must be an ASCII identifier that is not one of the library's own names "
-                                  "(init, shutdown, last_error, f64_list..., i64_list..., int_list...)", name))
+                                  "(init, shutdown, last_error, f64_list..., i64_list..., int_list..., dict_i64_...)", name))
             continue
         problems = []
         a = fn.args
+        str_at = [x for x in [*(arg.annotation for arg in a.args), fn.returns]
+                  if isinstance(x, ast.Name) and x.id == "str"]
+        if str_at:
+            # design 4.3.1: the C-ABI string kind is a later step with its own ABI version
+            found.append(_finding(rel, fn.lineno, "aot/library-str", name,
+                                  f"`{name}` cannot be exported: a str parameter or result has no C-ABI form yet "
+                                  "(the library's string kind comes with its own ABI version)", name))
+            continue
+        class_names = {c.name for c in getattr(program, "classes", ())}
         for arg in a.args:
-            if _scalar_or_list(arg.annotation) is None:
+            if _scalar_or_list(arg.annotation) is None and not (
+                    arg.annotation is not None and _is_class_annotation(arg.annotation, class_names)):
                 shown = ast.unparse(arg.annotation) if arg.annotation is not None else "no annotation"
                 problems.append(f"parameter `{arg.arg}` ({shown})")
-        if _return_types(fn.returns) is None:
+        if _return_types(fn.returns) is None and not (
+                fn.returns is not None and _is_class_annotation(fn.returns, class_names)):
             shown = ast.unparse(fn.returns) if fn.returns is not None else "no annotation"
             problems.append(f"the return ({shown})")
         if problems:
             found.append(_finding(rel, fn.lineno, "aot/export", name,
                                   f"`{name}` cannot be exported: {', '.join(problems)} is outside the library "
-                                  "boundary (parameters int, float, bool, list[int], list[float]; the result None, "
-                                  "one of those, or a tuple of int, float and bool)", name))
+                                  "boundary (parameters int, float, bool, list[int], list[float], dict[int, int], "
+                                  "dict[int, float], dict[int, bool]; the result None, one of those, or a tuple of "
+                                  "int, float and bool)", name))
             continue
         valid[name] = fn
     return found, valid
@@ -340,10 +481,13 @@ class _Export:
         self.node = node
         self.fn = fn
         # a list[int] is `int_list` where its group is big-capable (aot/rep.py), `i64_list` where it is raw
-        self.params = [(p.name, "int_list" if p.type is Type.I64_ARRAY and reps is not None
+        self.params = [(p.name, _dict_type(p.kinds) if p.type is Type.DICT          # type: ignore[union-attr]
+                        else "int_list" if p.type is Type.I64_ARRAY and reps is not None
                         and reps.list_big(name, p.name) else _TYPE_NAME[p.type])          # type: ignore[union-attr]
                        for p in fn.params]
-        if fn.returns in _TYPE_NAME:
+        if fn.returns is Type.DICT:
+            self.returns = [_dict_type(fn.return_kinds)]
+        elif fn.returns in _TYPE_NAME:
             self.returns = ["int_list" if fn.returns is Type.I64_ARRAY and reps is not None and reps.return_big(name)
                             else _TYPE_NAME[fn.returns]]
         elif kinds is not None:
@@ -362,6 +506,10 @@ class _Export:
                 self.tagged_results = {i for i, k in enumerate(kinds) if k is Type.I64 and reps.element(name, i) == "tagged"}
 
     @property
+    def dict_types(self) -> list[str]:
+        return [t for t in [*(t for _, t in self.params), *self.returns] if t in _DICT_KINDS]
+
+    @property
     def uses_int_list(self) -> bool:
         return "int_list" in [t for _, t in self.params] or "int_list" in self.returns
 
@@ -373,14 +521,15 @@ class _Export:
         """The C parameter list: the arguments, then the out pointers."""
         out = []
         for name, t in self.params:
-            ct = f"{p}_{t} *" if t in _LIST_ELEMENT else f"{_C_TYPE[t]} "
+            ct = f"{p}_{t} *" if t in _HANDLE else f"{_C_TYPE[t]} "
             out.append(f"{ct}p_{mangle(name)}")
         for nm, t in zip(self.out_names(), self.returns):
-            out.append(f"{p}_{t} **{nm}" if t in _LIST_ELEMENT else f"{_C_TYPE[t]} *{nm}")
+            out.append(f"{p}_{t} **{nm}" if t in _HANDLE else f"{_C_TYPE[t]} *{nm}")
         return out
 
     def out_names(self) -> list[str]:
-        return ["out" if len(self.returns) == 1 and self.fn.returns in _TYPE_NAME else f"out{i}"
+        return ["out" if len(self.returns) == 1 and (self.fn.returns in _TYPE_NAME or self.fn.returns is Type.DICT)
+                else f"out{i}"
                 for i in range(len(self.returns))]
 
     def signature_text(self) -> str:
@@ -401,6 +550,8 @@ class _Export:
         for i, t in enumerate(self.returns):
             if t in _LIST_ELEMENT:
                 lines.append(f"    tpa_{_LIST_ELEMENT[t]}_list *r{i} = NULL;")
+            elif t in _DICT_KINDS:
+                lines.append(f"    tpa_dict *r{i} = NULL;")
             elif i in self.tagged_results:
                 lines.append(f"    tpa_int r{i} = TPA_INT_ZERO;")
                 lines.append(f"    int64_t v{i} = 0;")
@@ -409,15 +560,15 @@ class _Export:
             else:
                 lines.append(f"    {_C_TYPE[t]} r{i} = 0;")
         outs = self.out_names()
-        list_outs = [o for o, t in zip(outs, self.returns) if t in _LIST_ELEMENT]
+        list_outs = [o for o, t in zip(outs, self.returns) if t in _HANDLE]
 
         def failure(indent: str) -> list[str]:
             return [f"{indent}*{o} = NULL;" for o in list_outs]
         for name, t in self.params:
-            if t in _LIST_ELEMENT:
+            if t in _HANDLE:
                 lines.append(f"    if (p_{mangle(name)} == NULL) {{")
                 lines += failure("        ")
-                lines.append(f"        return tpa_lib_null_handle(\"{_c_escape(name)}\");")
+                lines.append(f"        return {_null_check(t)}(\"{_c_escape(name)}\");")
                 lines.append("    }")
         call_args: list[str] = []
         for name, t in self.params:
@@ -472,21 +623,23 @@ class _Export:
         for i, t in enumerate(self.returns):
             if t in _LIST_ELEMENT:
                 lines.append(f"    tpa_{_LIST_ELEMENT[t]}_list *r{i} = NULL;")
+            elif t in _DICT_KINDS:
+                lines.append(f"    tpa_dict *r{i} = NULL;")
             elif t == "bool":
                 lines.append(f"    int r{i} = 0;")
             else:
                 lines.append(f"    {_C_TYPE[t]} r{i} = 0;")
             temps.append(f"&r{i}")
         outs = self.out_names()
-        list_outs = [(o, i) for i, (o, t) in enumerate(zip(outs, self.returns)) if t in _LIST_ELEMENT]
+        list_outs = [(o, i) for i, (o, t) in enumerate(zip(outs, self.returns)) if t in _HANDLE]
 
         def failure() -> list[str]:
             return [f"        *{o} = NULL;" for o, _ in list_outs]
         for name, t in self.params:
-            if t in _LIST_ELEMENT:
+            if t in _HANDLE:
                 lines.append(f"    if (p_{mangle(name)} == NULL) {{")
                 lines += failure()
-                lines.append(f"        return tpa_lib_null_handle(\"{_c_escape(name)}\");")
+                lines.append(f"        return {_null_check(t)}(\"{_c_escape(name)}\");")
                 lines.append("    }")
         lines.append(f"    rc = {callee}({', '.join(call_args + temps)});")
         lines.append("    if (rc != 0) {")
@@ -501,6 +654,62 @@ class _Export:
     def description(self, p: str) -> dict:
         return {"name": self.name, "symbol": f"{p}_{mangle(self.name)}", "line": self.node.lineno,
                 "params": [{"name": n, "type": t} for n, t in self.params], "returns": list(self.returns)}
+
+
+def _dict_type(kinds) -> str:
+    """The vocabulary name of a boundary dict's kinds (int keys; the front end and `_Plan.emit` refuse the others)."""
+    return f"dict_i64_{_TYPE_NAME[kinds[1]]}"
+
+
+def _null_check(t: str) -> str:
+    return "tpa_lib_null_dict" if t in _DICT_KINDS else "tpa_lib_null_handle"
+
+
+def _dict_functions(p: str, kind: str) -> list[str]:
+    """The functions of one dict kind of ABI version 3; only a library whose signatures use the kind has them. They
+    forward to the runtime's TPA_LIBRARY block of tp_aot_dict.h with the C types of the kind."""
+    v, vk = _DICT_KINDS[kind]
+    ct, h = _C_TYPE[v], f"{p}_{kind}"
+    return [
+        f"TPA_EXPORT {h} *{h}_new(void)",
+        "{",
+        f"    return tpa_lib_dict_new({vk});",
+        "}",
+        f"TPA_EXPORT int {h}_set({h} *d, int64_t key, {ct} value)",
+        "{",
+        "    return tpa_lib_dict_set(d, key, &value);",
+        "}",
+        f"TPA_EXPORT int {h}_get(const {h} *d, int64_t key, {ct} *out)",
+        "{",
+        "    return tpa_lib_dict_get(d, key, out);",
+        "}",
+        f"TPA_EXPORT int {h}_contains(const {h} *d, int64_t key)",
+        "{",
+        "    return tpa_lib_dict_contains(d, key);",
+        "}",
+        f"TPA_EXPORT int {h}_next(const {h} *d, int64_t *pos, int64_t *key, {ct} *value)",
+        "{",
+        "    return tpa_lib_dict_next(d, pos, key, value);",
+        "}",
+        f"TPA_EXPORT int64_t {h}_len(const {h} *d)",
+        "{",
+        "    return d == NULL ? 0 : d->used;",
+        "}",
+        f"TPA_EXPORT void {h}_retain({h} *d)",
+        "{",
+        "    tpa_dict_retain(d);",
+        "}",
+        f"TPA_EXPORT void {h}_release({h} *d)",
+        "{",
+        "    tpa_dict_release(d);",
+        "}",
+        "",
+    ]
+
+
+def _dict_kinds_used(exports) -> list[str]:
+    used = {t for e in exports for t in e.dict_types}
+    return [k for k in _DICT_KINDS if k in used]
 
 
 def _c_escape(text: str) -> str:
@@ -597,6 +806,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         "#ifndef TPA_LIBRARY",
         "#define TPA_LIBRARY 1",
         "#endif",
+        # tier S2a: a list kind the library resizes internally (never one that crosses the boundary: aot/library-resize)
+        *[f"#define TPA_GROW_{k.upper()} 1" for k in g.grown_kinds()],
         '#include "tp_aot.h"',
         "@INT@",
         *emit_mod.FP_CONTRACT_PRAGMA,
@@ -605,6 +816,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
         f"typedef tpa_i64_list {p}_i64_list;",
         "@INTLIST@",
     ]
+    out += [f"typedef tpa_dict {p}_{k};" for k in _dict_kinds_used(exports)]     # tier S2b, ABI version 3
+    out += g.emit_str_lits()            # tier S1: the immortal literals of the functions' str values
     out += [g.prototype(f) for f in g.fns.values()]
     out.append("")
     for b in bodies:
@@ -614,6 +827,8 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     out += _list_functions(p)
     if any(e.uses_int_list for e in exports):
         out += _int_list_functions(p)
+    for k in _dict_kinds_used(exports):
+        out += _dict_functions(p, k)
     out += [
         f"TPA_EXPORT int {p}_init(void)",
         "{",
@@ -635,9 +850,15 @@ def _c_text(g, bodies: list[list[str]], exports: list[_Export], p: str) -> str:
     # (the typedef of the `int_list` kind, `@INTLIST@`, is a line of its own only in a library that uses the kind)
     text = text.replace("@INTLIST@\n", f"typedef tpa_int_list {p}_int_list;\n\n" if any(e.uses_int_list for e in exports)
                         else "\n")
-    if emit_mod.needs_int_runtime(text.replace("@INT@", "")):
-        return text.replace("@INT@", '#include "tp_aot_int.h"\n')
-    return text.replace("@INT@", "")
+    if not g.uses_str and not emit_mod.needs_int_runtime(text.replace("@INT@", "")):
+        return text.replace("@INT@", "")
+    include = '#include "tp_aot_int.h"\n'
+    if g.uses_str:                      # tier S1: the str runtime needs the int runtime's parser and formatter
+        tables = "".join(line + "\n" for line in unicode_mod.tables_c(g.ucd))     # tier S1b
+        include += tables + '#include "tp_aot_str.h"\n'
+    if g.uses_dict:                     # tier S2b: a dict inside the library or at its boundary (ABI version 3)
+        include += '#include "tp_aot_dict.h"\n'
+    return text.replace("@INT@", include)
 
 
 _HEADER_TOP = """\
@@ -737,6 +958,32 @@ _HEADER_INT_LIST = """\
 """
 
 
+_HEADER_DICTS = """\
+ *
+ * Dicts ({kinds})
+ *   dict[int, int] is {name}_dict_i64_i64, dict[int, float] {name}_dict_i64_f64 and dict[int, bool] {name}_dict_i64_bool:
+ *   opaque, reference-counted handles with the ownership rules of the lists (arguments borrowed, a returned handle and one
+ *   from _new owned by the caller, _retain / _release, a function that returns its argument returns the same handle).
+ *   _new() makes an empty dict and clears the error record. _set(d, key, value) is d[key] = value: a new key goes last, an
+ *   existing key keeps its place and takes the value (for a bool value, anything other than 0 is true). _get(d, key, &v)
+ *   is d[key]; a missing key is a KeyError whose message is the key, as the source language gives it. _contains(d, key)
+ *   is 1 or 0. _len(d) is the number of items (0 for NULL). To read the items in their order (the source language's
+ *   insertion order), start with int64_t pos = 0 and call _next(d, &pos, &key, &value) until it returns 0; each 1 gives one
+ *   item. Inside the library an int key or value has no limit; a key or value outside int64_t cannot be read: _get or _next
+ *   fails with -1 and an OverflowError, nothing is written, and _next has moved past that item, so the next call goes on.
+ *   The messages are
+ *     "the key of the dict does not fit in 64 bits"
+ *     "the value of the dict does not fit in 64 bits"
+ *   That check belongs to this ABI and has no counterpart in the source language. A NULL handle is a TypeError naming the argument, for an
+ *   exported function and for _set, _get, _contains and _next (which return -1; nothing is written). These functions
+ *   except _new leave the error record as it is when they succeed.
+ *   Threads: the library never writes a dict that crosses its boundary (a function that would is not exported), so one
+ *   handle may be read, and passed to calls, from any number of threads at once. Build a dict with _new and _set before
+ *   you share it: a _set while another thread uses the same dict, or while a call holds it, is a data race (the dict has
+ *   no lock), which is the caller's to prevent. The counts of _retain and _release are atomic, as for the lists.
+"""
+
+
 def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = False) -> str:
     up = p.upper()
     guard = f"TP_AOT_LIB_{up}_H"
@@ -745,6 +992,11 @@ def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = Fal
     if int_list:
         assert _HEADER_LISTS_END in top
         top = top.replace(_HEADER_LISTS_END, _HEADER_INT_LIST.format(name=p) + _HEADER_LISTS_END)
+    dicts = _dict_kinds_used(exports)
+    if dicts:
+        assert _HEADER_LISTS_END in top
+        top = top.replace(_HEADER_LISTS_END, _HEADER_DICTS.format(name=p, kinds=", ".join(f"{p}_{k}" for k in dicts))
+                          + _HEADER_LISTS_END)
     if tagged:
         assert _HEADER_INT_OLD in top
         top = top.replace(_HEADER_INT_OLD, _HEADER_INT_NEW)
@@ -764,6 +1016,8 @@ def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = Fal
            f"typedef struct {p}_i64_list {p}_i64_list;    /* list[int], opaque */"]
     if int_list:
         out.append(f"typedef struct {p}_int_list {p}_int_list;    /* list[int] that may hold values outside 64 bits, opaque */")
+    for k in dicts:
+        out.append(f"typedef struct {p}_{k} {p}_{k};    /* dict[int, {_PY_NAME[_DICT_KINDS[k][0]]}], opaque */")
     out.append("")
     for e in exports:
         returns = ", ".join(e.returns) or "None"
@@ -799,6 +1053,23 @@ def _header_text(p: str, module: str, exports: list[_Export], tagged: bool = Fal
                 "/* one more owner / one owner less (NULL is a no-op); the last release frees */",
                 f"{up}_API void {p}_int_list_retain({p}_int_list *l);",
                 f"{up}_API void {p}_int_list_release({p}_int_list *l);", ""]
+    for k in dicts:
+        h, ct = f"{p}_{k}", _C_TYPE[_DICT_KINDS[k][0]]
+        out += [f"/* dict[int, {_PY_NAME[_DICT_KINDS[k][0]]}]: an empty dict; NULL with a MemoryError record on failure */",
+                f"{up}_API {h} *{h}_new(void);",
+                "/* d[key] = value: 0, or -1 with the error record */",
+                f"{up}_API int {h}_set({h} *d, int64_t key, {ct} value);",
+                "/* d[key] into *out: 0, or -1 with a KeyError (or an OverflowError for an int that does not fit) */",
+                f"{up}_API int {h}_get(const {h} *d, int64_t key, {ct} *out);",
+                "/* key in d: 1 or 0 (-1 for NULL) */",
+                f"{up}_API int {h}_contains(const {h} *d, int64_t key);",
+                "/* the next item in insertion order from *pos (start at 0): 1, 0 at the end, or -1 (see Dicts above) */",
+                f"{up}_API int {h}_next(const {h} *d, int64_t *pos, int64_t *key, {ct} *value);",
+                "/* the number of items (0 for NULL) */",
+                f"{up}_API int64_t {h}_len(const {h} *d);",
+                "/* one more owner / one owner less (NULL is a no-op); the last release frees */",
+                f"{up}_API void {h}_retain({h} *d);",
+                f"{up}_API void {h}_release({h} *d);", ""]
     out += ["#ifdef __cplusplus", "}", "#endif", "", f"#endif /* {guard} */", ""]
     return "\n".join(out)
 
@@ -813,9 +1084,15 @@ def _description(p: str, exports: list[_Export]) -> dict:
         lists["int_list"] = {"element": "i64", "new": f"{p}_int_list_new", "len": f"{p}_int_list_len",
                              "get": f"{p}_int_list_get", "set": f"{p}_int_list_set",
                              "retain": f"{p}_int_list_retain", "release": f"{p}_int_list_release"}
-    return {"prefix": p, "library": library_file_name(p), "abi_version": ABI_VERSION,
-            "runtime": {"init": f"{p}_init", "shutdown": f"{p}_shutdown", "last_error": f"{p}_last_error"},
-            "functions": [e.description(p) for e in exports], "lists": lists}
+    out = {"prefix": p, "library": library_file_name(p), "abi_version": ABI_VERSION,
+           "runtime": {"init": f"{p}_init", "shutdown": f"{p}_shutdown", "last_error": f"{p}_last_error"},
+           "functions": [e.description(p) for e in exports], "lists": lists}
+    dicts = _dict_kinds_used(exports)
+    if dicts:                           # ABI version 3: only the kinds a signature uses
+        out["dicts"] = {k: {"key": "i64", "value": _DICT_KINDS[k][0],
+                            **{op: f"{p}_{k}_{op}" for op in ("new", "set", "get", "contains", "next", "len", "retain",
+                                                              "release")}} for k in dicts}
+    return out
 
 
 # --- the pipeline -----------------------------------------------------------------------------------
@@ -844,18 +1121,65 @@ class _Plan:
         g, fn_bodies, more = emit_mod.emit_functions(proved, program, names, strict_int=self.strict_int)
         found += more
         exports: list[_Export] = []
+        read_only = dict_read_only(proved, names)
         for name, node in self.nodes.items():
             fn = g.fns.get(name)
             if fn is None:
                 continue                    # not proved: `_lower` reports it
+            mut_cls = [
+                q.cls for q in fn.params
+                if isinstance(q, ir.Param) and q.type is Type.OBJ and q.cls is not None
+                and not g.cls_analysis.class_immutable_for_library(q.cls)
+            ]
+            if (fn.returns is Type.OBJ and fn.return_cls is not None
+                    and not g.cls_analysis.class_immutable_for_library(fn.return_cls)):
+                mut_cls.append(fn.return_cls)
+            if mut_cls:
+                for cname in dict.fromkeys(mut_cls):
+                    found.append(_finding(
+                        rel, node.lineno, "aot/library-mutable-class", cname,
+                        f"`{name}` cannot export mutable class `{cname}` in a library build (TPA_THREADS "
+                        "requires immutable-after-init classes until Tier T adds per-object locking)",
+                        name,
+                    ))
+                continue
+            # tier S2a (design 4.3.2, option (a) of the S2 review B2): a list kind the program resizes cannot cross the
+            # boundary until tier T, since a resize frees the block another thread or a `_data` pointer is reading
+            boundary = {g.array_kind(fn.name, q.name, q.type) for q in fn.params
+                        if isinstance(q, ir.ArrayParam) and q.type in LIST}
+            if fn.returns in LIST:
+                boundary.add(g.ret_kind(fn))
+            resized = sorted(boundary & g.grown)
+            if resized:
+                found.append(_finding(
+                    rel, node.lineno, "aot/library-resize", name,
+                    f"`{name}` exports a list of the kind {', '.join(resized)} whose length the library changes "
+                    "(append, insert, extend, pop, clear, remove): a list that crosses the boundary keeps its length "
+                    "until tier T adds per-list locking (another thread or a `_data` pointer may be reading it)", name))
+                continue
+            split = [a.arg for a in node.args.args if tuples.annotation_shape(a.annotation) is not None]
+            if split:
+                # tier S2a: a tuple parameter is one parameter per element inside the program (typedpython/tuples.py);
+                # the library boundary keeps the signature as written, so it does not export one yet
+                found.append(_finding(rel, node.lineno, "aot/export", name,
+                                      f"`{name}` cannot be exported: its parameter `{split[0]}` is a tuple, which does "
+                                      "not cross the library boundary in tier S2a (pass the elements)", name))
+                continue
             kinds = g.tuple_kinds(fn)
             ok = (all((isinstance(q, ir.Param) and q.type in CTYPE and q.cls is None)
+                      or (isinstance(q, ir.Param) and q.type is Type.DICT and _boundary_dict(q.kinds))
                       or (isinstance(q, ir.ArrayParam) and q.type in LIST and q.buffer is None) for q in fn.params)
-                  and (fn.returns in CTYPE or fn.returns in LIST or fn.returns is Type.NONE or kinds is not None))
+                  and (fn.returns in CTYPE or fn.returns in LIST or fn.returns is Type.NONE
+                       or (fn.returns is Type.DICT and _boundary_dict(fn.return_kinds))
+                       or (kinds is not None and all(k in CTYPE for k in kinds))))     # (a str element: not exported yet)
             if not ok:
                 found.append(_finding(rel, node.lineno, "aot/export", name,
                                       f"`{name}` cannot be exported: its lowered signature is outside the library "
                                       "boundary", name))
+                continue
+            writes = dict_write_findings(proved, fn, rel, node.lineno, read_only)
+            if writes:
+                found += writes
                 continue
             exports.append(_Export(name, node, fn, kinds, g.reps))
         if found:

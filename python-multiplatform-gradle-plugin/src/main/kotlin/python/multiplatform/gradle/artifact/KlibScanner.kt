@@ -151,6 +151,7 @@ internal object KlibScanner {
      * (`kotlin-stdlib`, `kotlinx-coroutines-core`) contains a composable, so what is proved here is
      * that reading it is free and cannot mis-bind, not that it returns `true` on a real Compose klib.
      */
+    private val RESTRICTS_SUSPENSION = AbiQualifiedName(AbiCompoundName("kotlin.coroutines"), AbiCompoundName("RestrictsSuspension"))
     private val COMPOSABLE = AbiQualifiedName(AbiCompoundName("androidx.compose.runtime"), AbiCompoundName("Composable"))
 
     /**
@@ -646,19 +647,44 @@ internal object KlibScanner {
         val owner = cls.qualifiedName.dotted()
         val ownerType = KotlinTypeModel(owner)
         val generic = cls.typeParameters.isNotEmpty()
+        if (generic && (cls.isValue || cls.hasAnnotation(PUBLISHED_API))) return emptyList()
         if (!generic && handleClassOrNull(ownerType, classes) == null) return emptyList()
 
+        val classSubstitutions = if (generic) substitutableClassTypeParameters(cls.typeParameters) else emptyMap()
         val unbindable = when {
-            generic -> "a member of a generic class: not bound yet"
+            generic && classSubstitutions == null ->
+                "a member of a generic class whose type parameter has an unsupported bound"
             cls.kind == AbiClassKind.CLASS && cls.modality != AbiModality.FINAL ->
                 "a member of a non-final class: this klib ABI does not say whether it is protected"
             else -> null
+        }
+        val readReceiver = if (!generic) {
+            "(args[0] as $owner)"
+        } else {
+            "(args[0] as $owner${List(cls.typeParameters.size) { "*" }.joinToString(", ", "<", ">")})"
+        }
+        val writeReceiver = if (!generic) {
+            "(args[0] as $owner)"
+        } else if (classSubstitutions != null) {
+            val args = cls.typeParameters.map { classSubstitutions.getValue(it.tag).render() }
+            "(args[0] as $owner${args.joinToString(", ", "<", ">")})"
+        } else {
+            null
         }
         val enum = cls.kind == AbiClassKind.ENUM_CLASS
         return cls.declarations.filterIsInstance<AbiProperty>()
             .filter { property -> !(enum && property.leafName() in ENUM_STATICS) }
             .flatMap { property ->
-                memberPropertyCandidatesFor(property, owner, ownerType, unbindable, classes)
+                memberPropertyCandidatesFor(
+                    property = property,
+                    owner = owner,
+                    ownerType = ownerType,
+                    readReceiver = readReceiver,
+                    writeReceiver = writeReceiver,
+                    typeParameters = classSubstitutions ?: emptyMap(),
+                    unbindable = unbindable,
+                    classes = classes,
+                )
             }
     }
 
@@ -666,13 +692,16 @@ internal object KlibScanner {
         property: AbiProperty,
         owner: String,
         ownerType: KotlinTypeModel,
+        readReceiver: String,
+        writeReceiver: String?,
+        typeParameters: Map<String, KotlinTypeModel>,
         unbindable: String?,
         classes: Map<String, AbiClass>,
     ): List<Candidate> {
         val propName = property.leafName()
         if (!ArtifactScanner.isWritableParameterName(propName)) return emptyList()
         val getter = property.getter ?: return emptyList()
-        val typeModel = typeModelOf(getter.returnType) ?: return emptyList()
+        val typeModel = typeModelOf(getter.returnType, typeParameters) ?: return emptyList()
         val getterModel = DeclarationModel(
             simpleName = propName,
             owner = owner,
@@ -702,7 +731,8 @@ internal object KlibScanner {
         val returns = klibBoundaryTypeOf(typeModel, classes)
             ?: return declined("no boundary type for property type ${typeModel.render()}")
         val key = "$owner.$propName"
-        val readExpr = "(args[0] as $owner).${ArtifactScanner.writeParameterName(propName)}"
+        val readExpr = "$readReceiver.${ArtifactScanner.writeParameterName(propName)}"
+        val writeExpr = writeReceiver?.let { "$it.${ArtifactScanner.writeParameterName(propName)}" }
         val supertypes = if (returns.tag == OBJECT_TAG) supertypesOf(typeModel.qualifiedName, classes) else emptyList()
         val getterCandidate = Candidate(
             callable = ArtifactCallable(
@@ -729,6 +759,7 @@ internal object KlibScanner {
         val setter = property.setter
         val setterCandidate = if (
             setter != null &&
+            writeExpr != null &&
             !setter.hasAnnotation(DEPRECATED) &&
             !setter.hasAnnotation(PUBLISHED_API) &&
             !setter.hasAnnotation(COMPOSABLE)
@@ -742,7 +773,7 @@ internal object KlibScanner {
                         arity = 1,
                         paramTags = listOf(valueBoundary.tag),
                         returnTag = "UNIT",
-                        lambdaBody = "{ args -> $readExpr = ${valueBoundary.read("args[1]")}; Unit }",
+                        lambdaBody = "{ args -> $writeExpr = ${valueBoundary.read("args[1]")}; Unit }",
                         receiverTypeName = owner,
                         paramNames = listOf("value"),
                         paramTypeNames = listOf(typeModel.qualifiedName),
@@ -791,39 +822,69 @@ internal object KlibScanner {
         val owner = cls.qualifiedName.dotted()
         val ownerType = KotlinTypeModel(owner)
         val generic = cls.typeParameters.isNotEmpty()
+        if (generic && (cls.isValue || cls.hasAnnotation(PUBLISHED_API))) return emptyList()
         if (!generic && handleClassOrNull(ownerType, classes) == null) return emptyList()
         val propertyNames = cls.declarations.filterIsInstance<AbiProperty>()
             .mapTo(HashSet()) { it.leafName() }
+        val classSubstitutions = if (generic) substitutableClassTypeParameters(cls.typeParameters) else emptyMap()
+        val receiverExpr = if (!generic) {
+            "(args[0] as $owner)"
+        } else if (classSubstitutions != null) {
+            val args = cls.typeParameters.map { classSubstitutions.getValue(it.tag).render() }
+            "(args[0] as $owner${args.joinToString(", ", "<", ">")})"
+        } else {
+            "(args[0] as $owner)"
+        }
         // The pinned compiler's klib ABI records modality but no visibility, and lists the `protected`
         // members of an open, abstract or sealed class beside its public ones; source outside a subclass
         // cannot call a `protected` one. An interface has none, and a final class's are effectively
         // private, so only those members bind.
         val unbindable = when {
+            generic && classSubstitutions == null ->
+                "a member of a generic class whose type parameter has an unsupported bound"
             cls.kind == AbiClassKind.CLASS && cls.modality != AbiModality.FINAL ->
                 "a member of a non-final class: this klib ABI does not say whether it is protected"
             else -> null
         }
         val enum = cls.kind == AbiClassKind.ENUM_CLASS
+        // `@RestrictsSuspension` is BINARY-retained and the klib ABI keeps it on the class, as it keeps `@Composable`.
+        val restrictedScope = (listOf(owner) + supertypesOf(owner, classes)).any { name ->
+            name == "kotlin.sequences.SequenceScope" || classes[name]?.hasAnnotation(RESTRICTS_SUSPENSION) == true
+        }
         return cls.declarations.filterIsInstance<AbiFunction>()
             .filter { !it.isConstructor }
             // `Any`'s members are not the class's API, as on the jar side; an enum class's
             // `valueOf`/`values`/`entries` are statics the ABI lists among its members, and no
             // instance call reaches them.
             .filter { function -> !isAnyMember(function) && !(enum && function.leafName() in ENUM_STATICS) }
-            .mapNotNull { function -> memberCandidateOrNull(function, owner, ownerType, generic, unbindable, propertyNames, classes) }
+            .mapNotNull { function ->
+                memberCandidateOrNull(
+                    function = function,
+                    owner = owner,
+                    ownerType = ownerType,
+                    receiverExpr = receiverExpr,
+                    typeParameters = classSubstitutions ?: emptyMap(),
+                    unbindable = unbindable,
+                    restrictedScope = restrictedScope,
+                    propertyNames = propertyNames,
+                    classes = classes,
+                )
+            }
     }
 
     private fun memberCandidateOrNull(
         function: AbiFunction,
         owner: String,
         ownerType: KotlinTypeModel,
-        generic: Boolean,
+        receiverExpr: String,
+        typeParameters: Map<String, KotlinTypeModel>,
         unbindable: String?,
+        restrictedScope: Boolean,
         propertyNames: Set<String>,
         classes: Map<String, AbiClass>,
     ): Candidate? {
         val name = function.leafName()
-        val model = declarationModelOf(function)?.copy(
+        val model = declarationModelOf(function, typeParameters)?.copy(
             simpleName = name,
             owner = owner,
             ownerIsClass = true,
@@ -833,9 +894,8 @@ internal object KlibScanner {
         ) ?: return null
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
         when {
-            function.isSuspend -> return declined("suspend")
-            generic -> return declined("a member of a generic class: not bound yet")
             unbindable != null -> return declined(unbindable)
+            function.isSuspend && restrictedScope -> return declined(RESTRICTED_SUSPEND_REASON)
             function.hasAnnotation(DEPRECATED) ->
                 return declined("@Deprecated: its level is not in this klib ABI, and a HIDDEN one cannot be called from source")
             function.hasAnnotation(PUBLISHED_API) ->
@@ -860,7 +920,12 @@ internal object KlibScanner {
 
         val key = "$owner.$name"
         val argumentExpressions = boundaryTypes.mapIndexed { index, type -> type.read("args[${index + 1}]") }
-        val body = returnType.wrapReturn("(args[0] as $owner).$name(${argumentExpressions.joinToString(", ")})")
+        val rawBody = returnType.wrapReturn("$receiverExpr.$name(${argumentExpressions.joinToString(", ")})")
+        val body = if (function.isSuspend) {
+            "python.multiplatform.ffi.upcall.PendingCall.start { $rawBody }"
+        } else {
+            rawBody
+        }
         val supertypes = if (returnType.tag == OBJECT_TAG) supertypesOf(model.returnType.qualifiedName, classes) else emptyList()
         val callable = ArtifactCallable(
             name = key,
@@ -876,6 +941,7 @@ internal object KlibScanner {
             // Every argument is passed, as for a top-level klib entry (see [candidateOrNull]).
             paramHasDefault = List(boundaryTypes.size) { false },
             kind = ArtifactScanner.METHOD_KIND,
+            isSuspend = function.isSuspend,
         )
         return Candidate(
             callable = callable,
@@ -1027,11 +1093,14 @@ internal object KlibScanner {
 
     /** The declared shape of one klib function, independent of whether the boundary can carry it --
      * [ArtifactScanner.declarationModelOf]'s counterpart, and `null` under the same condition. */
-    private fun declarationModelOf(function: AbiFunction): DeclarationModel? {
+    private fun declarationModelOf(
+        function: AbiFunction,
+        typeParameters: Map<String, KotlinTypeModel> = emptyMap(),
+    ): DeclarationModel? {
         val parameters = function.valueParameters.map { parameter ->
             DeclaredParameter(
                 name = null,
-                type = typeModelOf(parameter.type) ?: return null,
+                type = typeModelOf(parameter.type, typeParameters) ?: return null,
                 declaresDefault = parameter.hasDefaultArg,
             )
         }
@@ -1044,41 +1113,73 @@ internal object KlibScanner {
             // so no bound declaration is ever missing a receiver it should have had.
             receiver = null,
             parameters = parameters,
-            returnType = typeModelOf(function.returnType) ?: return null,
+            returnType = typeModelOf(function.returnType, typeParameters) ?: return null,
             parameterNamesKnown = false,
             isComposable = function.hasAnnotation(COMPOSABLE),
             isSuspend = function.isSuspend,
         )
     }
 
+    private fun substitutableClassTypeParameters(
+        parameters: List<org.jetbrains.kotlin.library.abi.AbiTypeParameter>,
+    ): Map<String, KotlinTypeModel>? {
+        val map = LinkedHashMap<String, KotlinTypeModel>(parameters.size)
+        for (parameter in parameters) {
+            if (parameter.isReified) return null
+            when (parameter.upperBounds.size) {
+                0 -> map[parameter.tag] = KotlinTypeModel("kotlin.Any", isNullable = true)
+                1 -> {
+                    val bound = typeModelOf(parameter.upperBounds[0]) ?: return null
+                    map[parameter.tag] = bound
+                }
+                else -> return null
+            }
+        }
+        return map
+    }
+
     /**
      * A klib type as [KotlinTypeModel] spells it, or `null` when the classifier has no Kotlin name to
-     * write -- a type-parameter reference, a dynamic or error type.
+     * write -- an unsubstituted type-parameter reference, a dynamic or error type.
      *
      * `valueClass` is always `null`: see this object's KDoc for why a klib cannot answer that
      * question on this compiler version, and why leaving it empty is the honest answer rather than a
      * gap. Nullability and type arguments, in contrast, *are* on `AbiType.Simple` and are read --
      * they are what lets [klibBoundaryTypeOf] refuse a nullable primitive.
      */
-    private fun typeModelOf(type: AbiType?): KotlinTypeModel? {
+    private fun typeModelOf(
+        type: AbiType?,
+        typeParameters: Map<String, KotlinTypeModel> = emptyMap(),
+    ): KotlinTypeModel? {
         // A `null` return type is how the ABI spells `Unit` for some declarations; anything else
         // unrecognised is refused rather than guessed.
         if (type == null) return KotlinTypeModel("kotlin.Unit")
         if (type !is AbiType.Simple) return null
-        val reference = type.classifierReference
-        if (reference !is AbiClassifierReference.ClassReference) return null
-        val arguments = type.arguments.map { argument ->
-            when (argument) {
-                is AbiTypeArgument.StarProjection -> null
-                is AbiTypeArgument.TypeProjection -> typeModelOf(argument.type) ?: return null
-                else -> return null
+        when (val reference = type.classifierReference) {
+            is AbiClassifierReference.TypeParameterReference -> {
+                val bound = typeParameters[reference.tag] ?: return null
+                return when (type.nullability) {
+                    AbiTypeNullability.MARKED_NULLABLE -> if (bound.isNullable) bound else bound.copy(isNullable = true)
+                    AbiTypeNullability.DEFINITELY_NOT_NULL -> if (bound.isNullable) bound.copy(isNullable = false) else bound
+                    else -> bound
+                }
             }
+            is AbiClassifierReference.ClassReference -> {
+                val arguments = type.arguments.map { argument ->
+                    when (argument) {
+                        is AbiTypeArgument.StarProjection -> null
+                        is AbiTypeArgument.TypeProjection -> typeModelOf(argument.type, typeParameters) ?: return null
+                        else -> return null
+                    }
+                }
+                return KotlinTypeModel(
+                    qualifiedName = reference.className.dotted(),
+                    isNullable = type.nullability == AbiTypeNullability.MARKED_NULLABLE,
+                    arguments = arguments,
+                )
+            }
+            else -> return null
         }
-        return KotlinTypeModel(
-            qualifiedName = reference.className.dotted(),
-            isNullable = type.nullability == AbiTypeNullability.MARKED_NULLABLE,
-            arguments = arguments,
-        )
     }
 
     /** `packageName/relativeName` is `AbiQualifiedName`'s own spelling; Kotlin's is all dots. */
@@ -1101,6 +1202,10 @@ internal object KlibScanner {
         // the jar producer's `(%s as Type)` read and an unwrapped result, which the common trampoline
         // turns into a `HandleTable` handle and back. A nullable one carries the `?`: the handle is
         // already nullable at the boundary (`UpcallTrampoline.toKotlin` maps Python `None` to `null`).
+        if (type.qualifiedName == "kotlin.Any") {
+            val cast = if (type.isNullable) "kotlin.Any?" else "kotlin.Any"
+            return BoundaryType(OBJECT_TAG, "(%s as $cast)", "(%s)")
+        }
         if (!type.isNullable) primitiveBoundaryTypeOf(type.qualifiedName)?.let { return it }
         if (handleClassOrNull(type, classes) != null) {
             val cast = type.qualifiedName + if (type.isNullable) "?" else ""

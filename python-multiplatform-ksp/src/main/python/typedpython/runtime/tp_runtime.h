@@ -3180,9 +3180,16 @@ typedef struct {
      * tree reaches a member of an epoch tree, and around the breaker call of a poll. */
     uint64_t tree_epoch;
     int poll_raised;                /* #414: a poll of that call raised (its handler's exception); same owner */
+    /* tp_traced's cache (SPEC N-14), this thread's own: the monitoring version it last checked, whether a tool
+     * listened at that version, and the PyMonitoringState PyMonitoring_EnterScope writes. One cache shared by
+     * every thread was a data race under free-threading: two checks that ended together could leave the newer
+     * version with the older answer, kept until the version moved again. */
+    uint64_t mon_ver;
+    int mon_on;
+    PyMonitoringState mon_state[1];
 } tp_tls;
 
-static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL, 0, 0};
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL, 0, 0, 0, 0, {{0}}};
 
 static inline tp_tls *tp_tls_get(void)
 {
@@ -3197,8 +3204,21 @@ static Py_ssize_t tp_trace_frame_reads_count = 0;
 #define TP_TRACE_FRAME_READ() ((void)0)
 #endif
 
-/* Python frame depth of the running thread: public API only. The walk is O(depth), so it is
- * cached by the identity of the top frame (kept alive while compiled frames are in flight). */
+/* Python frame depth of the running thread: public API only. The walk is O(depth), so it is cached
+ * by the identity of a frame. Only a measurement with no compiled frame in flight (`count == 0`: the
+ * first check of the outermost compiled call) stores the cache: its top frame is below every compiled
+ * frame, so it outlives the cache, which tp_leave_call / tp_depth_done drop when `count` is 0 again,
+ * and holding it never makes a frame object outlive its frame. A measurement with compiled frames in
+ * flight (a nested compiled call from a callback g) walks from the top down to the cached frame and
+ * stores nothing: caching g's frame object would keep it alive after g returned, and then the frame
+ * object takes g's locals (`take_ownership`, Python/frame.c) and they die late (#125, design 4.3.3b,
+ * difference (2), fixed). The walk stops at the cached frame, so its length is the Python frames above
+ * the outermost compiled call, not the whole stack; with no cached frame it walks to the bottom.
+ * One exception to "no compiled frame in flight" (review of #508, F2): an exit of the outermost counted
+ * frame to its continuation (#426) lowers `count` to 0 around the continuation call, so a compiled call
+ * made from the continuation caches the continuation's frame; `tp_depth_py_end(-1)` and the frame's own
+ * `tp_leave_call` drop it right after the continuation returns, with no Python code in between, so that
+ * frame object outlives its frame only by that epilogue (as on develop before #125). */
 static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
 {
     TP_TRACE_FRAME_READ();
@@ -3210,19 +3230,30 @@ static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
         Py_DECREF(top);
         return t->depth.pydepth;
     }
+    int outermost = t->depth.count == 0;
+    PyObject *anchor = outermost ? NULL : t->depth.frame;
     Py_ssize_t depth = 0;
     PyFrameObject *cur = top;
-    Py_INCREF(cur);
+    if (outermost) {
+        Py_INCREF(cur);                     /* the reference from GetFrame goes to the cache */
+    }
     while (cur != NULL) {
+        if ((PyObject *)cur == anchor) {
+            depth += t->depth.pydepth;
+            Py_DECREF(cur);
+            break;
+        }
         depth++;
         PyFrameObject *back = PyFrame_GetBack(cur);
         Py_DECREF(cur);
         cur = back;
     }
-    PyObject *old = t->depth.frame;
-    t->depth.frame = (PyObject *)top;       /* takes the reference from GetFrame */
-    t->depth.pydepth = depth;
-    Py_XDECREF(old);
+    if (outermost) {
+        PyObject *old = t->depth.frame;
+        t->depth.frame = (PyObject *)top;
+        t->depth.pydepth = depth;
+        Py_XDECREF(old);
+    }
     return depth;
 }
 
@@ -3236,8 +3267,7 @@ static inline Py_ssize_t tp_python_depth(PyThreadState *ts, tp_tls *t)
  * return there, with the frame cache in exactly the state it would leave. The wrapper resets `seg`
  * right before its impl call (a nested wrapper must not take the outer segment's depth) and right
  * after it (the outer segment then measures again at its next check, where it measured before
- * segments existed: the cached frame, and so the lifetime of a returned callee's frame object, is
- * unchanged). Not moved, per frame as before: Py_GetRecursionLimit (a __del__ or a callback can call
+ * segments existed). Not moved, per frame as before: Py_GetRecursionLimit (a __del__ or a callback can call
  * sys.setrecursionlimit between two frames) and Py_EnterRecursiveCall (the C-stack guard compares
  * this frame's stack address). Thread-local like `count`; both assume calls nest in LIFO order on a
  * thread's C stack. */
@@ -3252,13 +3282,26 @@ static inline Py_ssize_t tp_seg_depth(PyThreadState *ts, tp_tls *t)
 static inline void tp_depth_seg_begin(tp_tls *t) { t->depth.seg = -1; }
 static inline void tp_depth_seg_end(tp_tls *t) { t->depth.seg = -1; }
 
+/* A refused entry counts nothing, so no tp_leave_call follows it: the outermost one (count 0) drops the
+ * frame its check cached, which would otherwise keep the caller's frame object (and, after the caller
+ * returns, its locals) alive until a later compiled call on this thread (#125). The caller is still
+ * running, so this decref frees nothing. */
+static inline void tp_enter_failed(tp_tls *t)
+{
+    if (t->depth.count == 0) {
+        Py_CLEAR(t->depth.frame);
+    }
+}
+
 static inline int tp_enter_call(PyThreadState *ts, tp_tls *t)
 {
     if (tp_seg_depth(ts, t) + t->depth.count + 1 > Py_GetRecursionLimit()) {
         PyErr_SetString(PyExc_RecursionError, "maximum recursion depth exceeded");
+        tp_enter_failed(t);
         return -1;
     }
     if (Py_EnterRecursiveCall(" in compiled code")) {
+        tp_enter_failed(t);
         return -1;
     }
     t->depth.count++;
@@ -3489,9 +3532,6 @@ static TP_COLD int tp_epoch_moved(tp_tls *t)
  * tracer enabled by another thread during an entry is a benign race.
  * A monitoring tool turned on while a compiled function runs sees that function from its next call
  * on (SPEC N-14, known difference). */
-static uint64_t tp_mon_ver = 0;
-static int tp_mon_on = 0;
-static PyMonitoringState tp_mon_state[1];
 static const uint8_t tp_mon_event[1] = {PY_MONITORING_EVENT_PY_START};
 
 #if PY_VERSION_HEX >= 0x030F0000 && PY_VERSION_HEX < 0x03100000
@@ -3530,21 +3570,21 @@ static TP_COLD int tp_mon_scan(PyObject *module)
     return on;
 }
 
-static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *code)
+static inline int tp_traced(PyObject *module, PyThreadState *ts, tp_tls *t, PyCodeObject *code)
 {
-    uint64_t v = tp_mon_ver;
+    uint64_t v = t->mon_ver;
     /* sys.settrace / sys.setprofile (and PyEval_SetTrace / SetProfile): per thread, as in CPython.
      * c_tracefunc / c_profilefunc are public members of PyThreadState (cpython/pystate.h; coverage's
      * C tracer and Cython read them), the only internal-looking read here. */
     if (TP_UNLIKELY(ts->c_tracefunc != NULL || ts->c_profilefunc != NULL)) {
         return 1;
     }
-    PyMonitoring_EnterScope(tp_mon_state, &v, tp_mon_event, 1);
-    if (TP_UNLIKELY(v != tp_mon_ver)) {
-        tp_mon_on = tp_mon_scan(module);
-        tp_mon_ver = v;
+    PyMonitoring_EnterScope(t->mon_state, &v, tp_mon_event, 1);
+    if (TP_UNLIKELY(v != t->mon_ver)) {
+        t->mon_on = tp_mon_scan(module);
+        t->mon_ver = v;
     }
-    if (TP_UNLIKELY(tp_mon_on || code == NULL)) {
+    if (TP_UNLIKELY(t->mon_on || code == NULL)) {
         return 1;
     }
     {
@@ -3578,7 +3618,9 @@ static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *c
 #define TP_PAR_MAX_THREADS 8        /* default cap; TYPEDPYTHON_THREADS overrides, up to TP_PAR_HARD_CAP */
 #endif
 #define TP_PAR_HARD_CAP 64
+#ifndef TP_PAR_MIN_CHUNK                /* overridable like TP_PAR_MIN_WORK: benchmarks/typedpython/par_threshold.py (#278) */
 #define TP_PAR_MIN_CHUNK 1024u      /* fewest iterations worth a thread of their own (placeholder, #151) */
+#endif
 #define TP_PAR_ALIGN 8u             /* chunk starts are multiples of 8 iterations = one 64-byte line of doubles */
 
 #if !defined(TP_NO_THREADS) && (defined(__unix__) || defined(__APPLE__)) && !defined(__EMSCRIPTEN__)

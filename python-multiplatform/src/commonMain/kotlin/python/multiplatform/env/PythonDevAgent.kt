@@ -10,9 +10,11 @@ import python.multiplatform.ffi.pyErrorOrGeneric
  * The dev agent (SPEC L-12, #233): a debug-only channel from a notebook or a hot reload into this
  * interpreter, designed in toolchain's `docs/design/live-connection.md` (option B).
  *
- * [Python3.initialize] calls [startIfRequested]. It does nothing unless the launcher set
- * [ENVIRONMENT_VARIABLE] (`port=<n>;token=<t>[;overlay=<dir>]`) **and** the app was built for it: one of
- * its installed payload roots ([PythonPayload.installed]) holds [ENABLE_MARKER]. Then the agent's Python
+ * [Python3.initialize] calls [startIfRequested]. It does nothing unless the app was built for it (one of
+ * its installed payload roots, [PythonPayload.installed], holds [ENABLE_MARKER]) **and** a request was made:
+ * [ENVIRONMENT_VARIABLE] (`port=<n>;token=<t>[;overlay=<dir>]`) when the launcher set it, otherwise the
+ * marker's own content in the same grammar. An installed Android or iOS app gets no environment variable,
+ * so toolchain writes the request into a debug staging's marker; an empty marker means no agent. Then the agent's Python
  * ([DEV_AGENT_SOURCE], embedded from `src/commonMain/python/python_multiplatform_devagent.py`) is loaded as
  * the module [MODULE] and listens on 127.0.0.1 with that token, which must be at least 32 random bytes
  * (`secrets.token_urlsafe(32)`). A refused or malformed request is reported on stderr and does not stop the app.
@@ -33,22 +35,31 @@ internal object PythonDevAgent {
     private var requested = false
 
     fun startIfRequested() {
-        if (requested || readEnvVar(ENVIRONMENT_VARIABLE).isNullOrBlank()) return
-        requested = true
-        if (enabledRoot() == null) {
+        if (requested) return
+        val root = enabledRoot()
+        if (root == null) {
+            if (readEnvVar(ENVIRONMENT_VARIABLE).isNullOrBlank()) return
+            requested = true
             println(
                 "WARNING: python-multiplatform dev agent not started: $ENVIRONMENT_VARIABLE is set, but no " +
                     "payload root holds $ENABLE_MARKER, so this is not a build made for it (a release build).",
             )
             return
         }
+        requested = true
         try {
             load()
-            Python3.exec("__import__(\"$MODULE\").start_from_env()")
+            // The variable is the request when set; otherwise the marker's content is (Python's
+            // `request_text`). An empty marker with no variable starts nothing.
+            Python3.exec("__import__(\"$MODULE\").start_from_env(${pythonString("$root/$ENABLE_MARKER")})")
         } catch (e: Exception) {
             println("WARNING: python-multiplatform dev agent not started: ${e.message}")
         }
     }
+
+    /** [text] as a Python string literal. */
+    private fun pythonString(text: String): String =
+        "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
     /** The installed payload root that holds [ENABLE_MARKER], if any. */
     private fun enabledRoot(): String? =

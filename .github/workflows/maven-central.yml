@@ -73,7 +73,7 @@ jobs:
         if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
-          version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)-$(sed -nE 's/^libraryVersionSuffix=(.*)$/\1/p' gradle.properties)"
+          version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)$(sed -nE 's/^libraryVersionSuffix=(.+)$/-\1/p' gradle.properties)"
           test "$TAG" = "v$version" || { echo "error: tag $TAG does not match version $version" >&2; exit 1; }
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
@@ -132,6 +132,6 @@ jobs:
           TYPE: ${{ inputs.publishing_type || 'USER_MANAGED' }}
         run: |
           set -euo pipefail
-          version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)-$(sed -nE 's/^libraryVersionSuffix=(.*)$/\1/p' gradle.properties)"
+          version="$(sed -nE 's/^pythonVersion=(.*)$/\1/p' gradle.properties)$(sed -nE 's/^libraryVersionSuffix=(.+)$/-\1/p' gradle.properties)"
           .github/scripts/release/central-upload.sh "$RUNNER_TEMP/central-bundle.zip" \
             "python-multiplatform $version" "$TYPE"

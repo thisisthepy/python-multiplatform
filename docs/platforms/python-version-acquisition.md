@@ -153,7 +153,7 @@ tests without throwing; the other flavour fails naming #158, as for `includeDir`
 A consumer that builds against `python-multiplatform` must know which CPython it embeds (issue #61).
 The answer is published three ways. The version is `pythonVersion` in `gradle.properties`; whether
 the build is free-threaded differs by platform (desktop 3.15t since #158, Android, androidNative and
-iOS 3.15t since #328, wasm GIL until #175), so each published artefact states its own.
+iOS 3.15t since #328, wasm 3.15t since #175), so each published artefact states its own.
 
 *   **Extension** `pythonMultiplatform` (`python.multiplatform.gradle.EmbeddedPythonVersion`):
     `pythonVersion` (`3.15.0`), `majorMinor` (`3.15`), `freeThreaded`. One value per project: the

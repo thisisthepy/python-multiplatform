@@ -2,7 +2,11 @@ package org.thisisthepy.python.multiplatform.demo.bindings
 
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.upcall.PythonProxySource
+import python.multiplatform.ffi.withGIL
 import python.native.ffi.UpcallEntry
+import kotlin.native.concurrent.ObsoleteWorkersApi
+import kotlin.native.concurrent.TransferMode
+import kotlin.native.concurrent.Worker
 
 /**
  * iOS has a boundary shim, and it is not `ctypes`.
@@ -44,18 +48,84 @@ actual fun installPythonProxies(): String = try {
 }
 
 /**
- * Not wired on iOS.
+ * The really-suspending `await`, settled from a Kotlin/Native [Worker] (SPEC U-5; #164 item 11,
+ * leader decision 2026-11-21).
  *
- * The fast-path `await` ([awaitFastPathDemo]) is shared and runs here; this one needs a Kotlin
- * thread to resume the parked continuation while the interpreter drives its loop, and starting one
- * from Kotlin/Native means a `Worker` and a decision about which memory model the parked lambda
- * crosses. That is a real design question for the library rather than something to improvise in a
- * sample, so it says so instead of pretending.
- *
- * The library's own `PythonProxyNativeDeliveryTest` does answer it, with a bare `pthread_create`:
- * an `await` over a generated `async def` whose Kotlin body genuinely suspended resolves on the
- * iOS simulator, resumed from a thread the Kotlin/Native runtime never attached.
+ * The same shape as the Android and desktop demos, with a `Worker` where they start a
+ * `java.lang.Thread`: the Worker polls, under `withGIL`, for the moment the loop has committed to
+ * the slow path (`created` is bumped by the counted `create_future`) and resumes the parked
+ * continuation there, holding the GIL as `PendingCall` requires. Any thread may do this as long as
+ * it holds `withGIL` while it resumes; the library proves it for a bare `pthread`
+ * (`PythonProxyNativeDeliveryTest`) and for a `Worker` (`AsyncUpcallWorkerDeliveryTest`), and a
+ * `kotlinx.coroutines` dispatcher thread is a `Worker` underneath. The `Worker` API is marked
+ * obsolete by Kotlin and is still the stdlib's one thread primitive on this target; an app with
+ * `kotlinx.coroutines` uses `Dispatchers.Default` the same way.
  */
-actual fun awaitSuspendingDemo(): String =
-    "not wired on iOS: resuming a parked continuation needs a Kotlin/Native worker, " +
-        "which this sample does not start. The fast-path await above does run here."
+@OptIn(ObsoleteWorkersApi::class)
+actual fun awaitSuspendingDemo(): String {
+    val worker = Worker.start(name = "kotlin-greeting-completer")
+    return try {
+        Python3.exec(
+            """
+            import asyncio
+            from $BINDINGS_MODULE import Greeter
+
+            _pm_demo_slow = {'created': 0, 'value': None, 'error': None}
+            _pm_demo_slow['loop'] = asyncio.new_event_loop()
+            _pm_demo_slow['orig'] = _pm_demo_slow['loop'].create_future
+
+
+            def _pm_demo_slow_count():
+                _pm_demo_slow['created'] += 1
+                return _pm_demo_slow['orig']()
+
+
+            _pm_demo_slow['loop'].create_future = _pm_demo_slow_count
+            _pm_demo_slow['g'] = Greeter('slow path')
+            """.trimIndent(),
+        )
+
+        val completion = worker.execute(TransferMode.SAFE, { Unit }) {
+            try {
+                var polls = 0
+                while (polls++ < 20_000) {
+                    val delivered = withGIL {
+                        evalToString("_pm_demo_slow['created']") != "0" && PendingGreetings.deliver()
+                    }
+                    if (delivered) return@execute null
+                    platform.posix.usleep(1_000u)
+                }
+                "IllegalStateException: no suspending Kotlin call ever parked a continuation"
+            } catch (t: Throwable) {
+                "${t::class.simpleName}: ${t.message}"
+            }
+        }
+        Python3.exec(
+            """
+            try:
+                _pm_demo_slow['value'] = _pm_demo_slow['loop'].run_until_complete(
+                    _pm_demo_slow['g'].greetLater(2)
+                )
+            except BaseException as _e:
+                _pm_demo_slow['error'] = type(_e).__name__ + ': ' + str(_e)
+            finally:
+                _pm_demo_slow['loop'].close()
+            """.trimIndent(),
+        )
+        val completerFailure = completion.result
+
+        val created = evalToString("_pm_demo_slow['created']")
+        val error = evalToString("_pm_demo_slow['error']")
+        listOf(
+            "await g.greetLater(2)       ->  ${evalToString("_pm_demo_slow['value']")}",
+            "asyncio Futures created     ->  $created  " +
+                if (created == "0") "(fast path -- this run proves nothing)" else "(slow path: settled from a Kotlin/Native Worker)",
+            "raised                      ->  $error",
+            "completer thread            ->  ${completerFailure ?: "clean"}",
+        ).joinToString("\n")
+    } catch (t: Throwable) {
+        "${t::class.simpleName}: ${t.message}"
+    } finally {
+        worker.requestTermination()
+    }
+}

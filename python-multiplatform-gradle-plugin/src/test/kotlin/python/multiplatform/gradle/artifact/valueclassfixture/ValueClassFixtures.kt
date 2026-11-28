@@ -99,16 +99,16 @@ fun withCallback(action: () -> Unit): Int {
 }
 
 /**
- * The function-typed shape that is still declined, and not for want of a *name*: its slot is
- * describable and its arity checks out.
- *
- * A `suspend` lambda's compiled type is `Function1<Continuation<Unit>, Any?>`, it answers
- * `COROUTINE_SUSPENDED` rather than a value, and Kotlin will not let source assign a `Function1` to a
- * `suspend` function type at all. `Modifier.pointerInput` is the real-world case -- the one
- * `a179b747`'s open note named beside `clickable`, and the one that turns out to be a different limit
- * from the one that note was about.
+ * A non-extension `suspend` function-typed parameter: binds now through `ArtifactScanner.suspendFunctionSlot`
+ * (SPEC U-5a; #164 item 7).
  */
 fun withSuspendCallback(action: suspend () -> Unit): Int = if (action === action) 1 else 0
+
+/**
+ * The function-typed shape that is still declined: a receiver-carrying `suspend` extension lambda
+ * (`suspend String.() -> Unit`, the `Modifier.pointerInput` shape).
+ */
+fun withSuspendExtensionCallback(action: suspend String.() -> Unit): Int = if (action === action) 1 else 0
 
 /**
  * `kotlin.time.Duration.getInWholeSeconds-impl(J)J`'s exact shape: a value class with a *public*

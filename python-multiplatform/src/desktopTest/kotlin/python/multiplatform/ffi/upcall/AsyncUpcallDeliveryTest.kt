@@ -184,7 +184,7 @@ class AsyncUpcallDeliveryTest {
                 "a Kotlin failure after suspension has to reach the awaiting coroutine as a raise",
             )
             assertEquals(
-                "RuntimeError: IllegalStateException: late boom",
+                "KotlinThrowable: IllegalStateException: late boom",
                 outcome.cause,
                 "a Kotlin failure after suspension must preserve the Kotlin throwable as __cause__",
             )
@@ -243,6 +243,257 @@ class AsyncUpcallDeliveryTest {
                 "an already-complete call must not be routed through asyncio",
             )
             assertTrue(AsyncTrampolineFragment.parked.isEmpty(), "nothing was ever left outstanding")
+        }
+
+    // ----------------------------------------------------------------- delivery loop (#164 item 10)
+
+    @Test
+    fun aSuspendingEntryThatFailsWithNoRunningLoopCancelsTheStartedPendingCall() =
+        PythonTestFixture.withInterpreter {
+            val raw = UpcallTrampoline.invoke(UpcallTable.resolve("async.tickUntilCancelled").raw, tuple("()"))
+            assertEquals(0L, raw)
+
+            val raised = PyException.fromCurrentError()
+            assertTrue(
+                raised?.message?.contains("running event loop") == true,
+                "expected a 'no running event loop' failure, got: ${raised?.message}",
+            )
+
+            val started = AsyncTrampolineFragment.started.poll(5, TimeUnit.SECONDS)
+            assertTrue(started != null, "the coroutine should have been started before the loop check")
+            assertTrue(
+                started.isCancelled,
+                "failing to resolve a delivery loop must cancel the already-started PendingCall",
+            )
+
+            // One tick is now enough for the cancelled body's ensureActive() to stop it.
+            val resume = AsyncTrampolineFragment.parked.poll(5, TimeUnit.SECONDS)
+            assertTrue(resume != null)
+            resume.invoke()
+            assertTrue(started.isDone, "the cancelled PendingCall should finish after one tick")
+            assertTrue(started.failure is CancellationException)
+        }
+
+    @Test
+    fun setDeliveryLoopAndUseDeliveryLoopValidateLoopAttributesAndOrderPriority() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.settleFunction()
+            Python3.exec(
+                """
+                import asyncio, contextvars, python_multiplatform as _pm
+                _dl = {}
+                _l1 = asyncio.new_event_loop()
+                _l2 = asyncio.new_event_loop()
+                try:
+                    _dl['initial'] = _pm.get_delivery_loop() is None
+                    _prev = _pm.set_delivery_loop(_l1)
+                    _dl['prev_none'] = _prev is None
+                    _dl['after_set'] = _pm.get_delivery_loop() is _l1
+                    with _pm.use_delivery_loop(_l2):
+                        _dl['in_with'] = _pm.get_delivery_loop() is _l2
+                        _ctx = contextvars.copy_context()
+                    _dl['after_with'] = _pm.get_delivery_loop() is _l1
+                    _dl['in_copied_ctx'] = _ctx.run(_pm.get_delivery_loop) is _l2
+                    _prev2 = _pm.set_delivery_loop(None)
+                    _dl['prev2_l1'] = _prev2 is _l1
+                    _dl['cleared'] = _pm.get_delivery_loop() is None
+                    try:
+                        _pm.set_delivery_loop(object())
+                        _dl['bad_set'] = 'accepted'
+                    except TypeError:
+                        _dl['bad_set'] = 'TypeError'
+                    try:
+                        with _pm.use_delivery_loop(object()):
+                            pass
+                        _dl['bad_use'] = 'accepted'
+                    except TypeError:
+                        _dl['bad_use'] = 'TypeError'
+                finally:
+                    _pm.set_delivery_loop(None)
+                    _l1.close()
+                    _l2.close()
+                """.trimIndent(),
+            )
+            assertEquals("True", PythonTestFixture.eval("_dl['initial']").toString())
+            assertEquals("True", PythonTestFixture.eval("_dl['prev_none']").toString())
+            assertEquals("True", PythonTestFixture.eval("_dl['after_set']").toString())
+            assertEquals("True", PythonTestFixture.eval("_dl['in_with']").toString())
+            assertEquals("True", PythonTestFixture.eval("_dl['after_with']").toString())
+            assertEquals("True", PythonTestFixture.eval("_dl['in_copied_ctx']").toString())
+            assertEquals("True", PythonTestFixture.eval("_dl['prev2_l1']").toString())
+            assertEquals("True", PythonTestFixture.eval("_dl['cleared']").toString())
+            assertEquals("TypeError", PythonTestFixture.eval("_dl['bad_set']").toString())
+            assertEquals("TypeError", PythonTestFixture.eval("_dl['bad_use']").toString())
+        }
+
+    @Test
+    fun aClosedConfiguredDeliveryLoopCancelsTheStartedPendingCallAndRaisesRuntimeError() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.settleFunction()
+            Python3.exec(
+                """
+                import asyncio, python_multiplatform as _pm
+                _closed_loop = asyncio.new_event_loop()
+                _closed_loop.close()
+                _pm.set_delivery_loop(_closed_loop)
+                """.trimIndent(),
+            )
+            try {
+                val raw = UpcallTrampoline.invoke(
+                    UpcallTable.resolve("async.tickUntilCancelled").raw,
+                    tuple("()"),
+                )
+                assertEquals(0L, raw)
+                val raised = PyException.fromCurrentError()
+                assertTrue(
+                    raised?.message?.contains("closed") == true,
+                    "expected a closed delivery loop failure, got: ${raised?.message}",
+                )
+                val started = AsyncTrampolineFragment.started.poll(5, TimeUnit.SECONDS)
+                assertTrue(started != null)
+                assertTrue(
+                    started.isCancelled,
+                    "a closed delivery loop must cancel the already-started PendingCall",
+                )
+                AsyncTrampolineFragment.parked.poll(5, TimeUnit.SECONDS)?.invoke()
+            } finally {
+                Python3.exec("import python_multiplatform as _pm; _pm.set_delivery_loop(None)")
+            }
+        }
+
+    @Test
+    fun aCoroutineSteppedWithNoRunningLoopOnItsThreadYieldsAFutureCreatedOnTheConfiguredDeliveryLoop() =
+        PythonTestFixture.withInterpreter {
+            assertTrue(bindUpcallOrNull("async.doubleLater"))
+            PythonProxySource.settleFunction()
+            Python3.exec(
+                """
+                import asyncio, concurrent.futures, contextvars, threading, python_multiplatform as _pm
+
+                _step = {}
+                _target_loop = asyncio.new_event_loop()
+                _loop_ready = threading.Event()
+                _step['create_threads'] = []
+
+                _orig_create_future = _target_loop.create_future
+                def _tracked_create_future():
+                    _step['create_threads'].append(threading.get_ident())
+                    return _orig_create_future()
+                _target_loop.create_future = _tracked_create_future
+
+                def _run_target_loop():
+                    _step['loop_tid'] = threading.get_ident()
+                    asyncio.set_event_loop(_target_loop)
+                    _target_loop.call_soon(_loop_ready.set)
+                    _target_loop.run_forever()
+
+                _loop_thread = threading.Thread(target=_run_target_loop, name='target-delivery-loop', daemon=True)
+                _loop_thread.start()
+                _loop_ready.wait(timeout=10.0)
+
+                async def _kotlin_mode_coro(x):
+                    r = _pm_bound(x)
+                    if hasattr(r, '__await__'):
+                        return await r
+                    return r
+
+                with _pm.use_delivery_loop(_target_loop):
+                    _task_ctx = contextvars.copy_context()
+
+                _coro = _kotlin_mode_coro(21)
+                # Step 1 on this thread (no running loop here!), inside the task's copied Context.
+                _step['stepper_tid'] = threading.get_ident()
+                _yielded = _task_ctx.run(_coro.send, None)
+                _step['yielded_type'] = type(_yielded).__name__
+                _step['same_loop'] = _yielded.get_loop() is _target_loop
+                """.trimIndent(),
+            )
+
+            try {
+                assertEquals("Future", PythonTestFixture.eval("_step['yielded_type']").toString())
+                assertEquals("True", PythonTestFixture.eval("_step['same_loop']").toString())
+                // CPython thread-safety requirement: create_future must have run on _target_loop's
+                // thread via call_soon_threadsafe, never on the non-loop stepper thread.
+                assertEquals(
+                    "True",
+                    PythonTestFixture.eval("_step['create_threads'] == [_step['loop_tid']] and _step['loop_tid'] != _step['stepper_tid']").toString(),
+                    "create_future() must run on the target loop thread, not the stepper thread",
+                )
+
+                // Now resume the Kotlin coroutine from a separate Kotlin completer thread and
+                // let the Kotlin-mode driver subscribe to the yielded Future on _target_loop.
+                val resume = AsyncTrampolineFragment.parked.poll(10, TimeUnit.SECONDS)
+                    ?: throw AssertionError("no suspending Kotlin call reached the fixture")
+                val completer = Thread {
+                    withGIL { resume.invoke() }
+                }
+                completer.start()
+                completer.join(10_000)
+
+                Python3.exec(
+                    """
+                    _bridge = concurrent.futures.Future()
+                    def _subscribe():
+                        def _on_done(f):
+                            if f.cancelled():
+                                _bridge.cancel()
+                            elif f.exception() is not None:
+                                _bridge.set_exception(f.exception())
+                            else:
+                                _bridge.set_result(f.result())
+                        _yielded.add_done_callback(_on_done)
+                    _target_loop.call_soon_threadsafe(_subscribe)
+                    _resolved_val = _bridge.result(timeout=10.0)
+                    try:
+                        _task_ctx.run(_coro.send, _resolved_val)
+                        _step['final'] = 'did not stop'
+                    except StopIteration as _stop:
+                        _step['final'] = _stop.value
+                    """.trimIndent(),
+                )
+                assertEquals("42", PythonTestFixture.eval("_step['final']").toString())
+            } finally {
+                Python3.exec(
+                    """
+                    _target_loop.call_soon_threadsafe(_target_loop.stop)
+                    _loop_thread.join(timeout=5.0)
+                    _target_loop.close()
+                    """.trimIndent(),
+                )
+            }
+        }
+
+    @Test
+    fun aRunningLoopOnTheCallingThreadWinsOverAnyConfiguredDeliveryLoop() =
+        PythonTestFixture.withInterpreter {
+            assertTrue(bindUpcallOrNull("async.doubleLater"))
+            installPythonHarness()
+            Python3.exec(
+                """
+                import asyncio, python_multiplatform as _pm
+                _other_loop = asyncio.new_event_loop()
+                _pm.set_delivery_loop(_other_loop)
+                """.trimIndent(),
+            )
+            try {
+                // _r['loop'] is the running loop on the calling thread inside _drive(...); even with
+                // _other_loop configured via set_delivery_loop and use_delivery_loop, the running
+                // loop must win so `await` on the running loop does not fail with a cross-loop Future.
+                val outcome = runAwaitOnTheLoopThread("_await_kotlin(21)")
+                assertNull(outcome.completerFailure)
+                assertTrue(outcome.sawLoopRunning)
+                assertEquals("Future", outcome.returned)
+                assertEquals("None", outcome.error)
+                assertEquals("42", outcome.value)
+            } finally {
+                Python3.exec(
+                    """
+                    import python_multiplatform as _pm
+                    _pm.set_delivery_loop(None)
+                    _other_loop.close()
+                    """.trimIndent(),
+                )
+            }
         }
 
     // ------------------------------------------------------------------------------------ harness

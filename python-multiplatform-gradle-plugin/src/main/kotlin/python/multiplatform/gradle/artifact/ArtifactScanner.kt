@@ -6,15 +6,18 @@ import kotlin.metadata.KmType
 import kotlin.metadata.KmVariance
 import kotlin.metadata.MemberKind
 import kotlin.metadata.Visibility
+import kotlin.metadata.declaresDefaultValue
 import kotlin.metadata.isFunInterface
 import kotlin.metadata.isNullable
 import kotlin.metadata.isSuspend
 import kotlin.metadata.isValue
 import kotlin.metadata.isVar
 import kotlin.metadata.jvm.KotlinClassMetadata
+import kotlin.metadata.jvm.annotations
 import kotlin.metadata.jvm.fieldSignature
 import kotlin.metadata.jvm.getterSignature
 import kotlin.metadata.jvm.setterSignature
+import kotlin.metadata.jvm.signature
 import kotlin.metadata.kind
 import kotlin.metadata.visibility
 import org.objectweb.asm.Opcodes
@@ -278,7 +281,7 @@ internal object ArtifactScanner {
         val (properties, rest) = entries.partition { it.declaration.kind in PROPERTY_KINDS }
         val (methods, functions) = rest.partition { it.declaration.kind == METHOD_KIND }
         val settledFunctions = assignThunkIndices(disambiguateOverloads(applyDefaultOmission(dropCollidingConstructors(functions))))
-        val settledMethods = settleMethodNames(disambiguateOverloads(methods), settledFunctions)
+        val settledMethods = settleMethodNames(disambiguateOverloads(applyDefaultOmission(methods)), settledFunctions)
         return (settledFunctions + settledMethods + settlePropertyNames(properties, settledFunctions + settledMethods))
             // The ancestry the binding carries is the model's too (issue #31): copied at the end, from the
             // callable that was actually bound, so the two cannot be read differently.
@@ -968,6 +971,13 @@ internal object ArtifactScanner {
         /** The receiver as generated source reads it out of `args[0]`. */
         val read: String,
         private val model: KotlinTypeModel,
+        /**
+         * The public methods the class's supertypes declare on the walk's classpath, by name (see
+         * [inheritedOverloadsOf]). An override takes its defaults from the declaration it overrides,
+         * as Kotlin does; every other inherited method of the same name joins the sibling test of
+         * [applyDefaultOmission], which on its own compares members of one receiver only.
+         */
+        val inheritedOverloads: Map<String, List<InheritedOverload>>,
     ) {
         /** [declaration] as a `METHOD`: read off a receiver of [owner], every argument passed. */
         fun restate(declaration: DeclarationModel): DeclarationModel = declaration.copy(
@@ -1002,6 +1012,75 @@ internal object ArtifactScanner {
      * shares its name with a property of the class, because Python has one attribute for both and the
      * property (#38) keeps it.
      */
+    /**
+     * One public method a supertype declares, as overload resolution on a subclass sees it.
+     *
+     * [parameterDescriptors] is the JVM descriptor's parameter list (a `suspend` function's trailing
+     * `Continuation` included), which is how an override is matched to what it overrides. [names] and
+     * [defaults] are the Kotlin value parameters; a Java method has no names a Kotlin call can write
+     * (`""`) and no defaults.
+     */
+    internal class InheritedOverload(
+        val parameterDescriptors: List<String>,
+        val names: List<String>,
+        val defaults: List<Boolean>,
+    ) {
+        /** Whether a call naming exactly [written] (name to JVM descriptor) could resolve to this method. */
+        fun accepts(written: List<Pair<String, String>>): Boolean {
+            val declared = names.indices.map { Triple(names[it], parameterDescriptors.getOrNull(it), defaults.getOrElse(it) { false }) }
+            return written.all { (name, descriptor) -> declared.any { it.first == name && it.second == descriptor } } &&
+                declared.filterNot { d -> written.any { it.first == d.first && it.second == d.second } }.all { it.third }
+        }
+    }
+
+    /**
+     * Every public method the supertypes of [node] declare on the classpath, `java.lang.Object`
+     * excluded, grouped by name. Kotlin lets only the original declaration state a default and every
+     * override inherits it, so the defaults of one signature are the union over the hierarchy.
+     */
+    private fun inheritedOverloadsOf(node: ClassNode, classpath: ArtifactClasspath): Map<String, List<InheritedOverload>> {
+        val bySignature = LinkedHashMap<Pair<String, List<String>>, InheritedOverload>()
+        val seen = HashSet<String>()
+        val pending = ArrayDeque<ClassNode>()
+        pending.addLast(node)
+        while (pending.isNotEmpty()) {
+            val current = pending.removeFirst()
+            (listOfNotNull(current.superName) + current.interfaces.orEmpty()).forEach { parentName ->
+                if (parentName == "java/lang/Object" || !seen.add(parentName)) return@forEach
+                val parent = classpath.classNode(parentName) ?: return@forEach
+                val metadata = kotlinClassMetadataOf(parent) as? KotlinClassMetadata.Class
+                if (metadata != null) {
+                    metadata.kmClass.functions.forEach { function ->
+                        if (function.visibility != Visibility.PUBLIC || function.receiverParameterType != null) return@forEach
+                        val descriptors = splitMethodDescriptor(function.signature?.descriptor ?: return@forEach).first
+                        val key = function.name to descriptors
+                        val defaults = function.valueParameters.map { it.declaresDefaultValue }
+                        val previous = bySignature[key]
+                        bySignature[key] = InheritedOverload(
+                            descriptors,
+                            previous?.names ?: function.valueParameters.map { it.name },
+                            if (previous == null) defaults
+                            else previous.defaults.mapIndexed { index, it -> it || defaults.getOrElse(index) { false } },
+                        )
+                    }
+                } else {
+                    parent.methods.orEmpty().forEach { method ->
+                        if (!method.access.hasFlag(Opcodes.ACC_PUBLIC) || method.access.hasFlag(Opcodes.ACC_STATIC) ||
+                            method.access.hasFlag(Opcodes.ACC_SYNTHETIC) || method.name.startsWith("<")
+                        ) return@forEach
+                        val descriptors = splitMethodDescriptor(method.desc).first
+                        bySignature.putIfAbsent(
+                            method.name to descriptors,
+                            InheritedOverload(descriptors, List(descriptors.size) { "" }, List(descriptors.size) { false }),
+                        )
+                    }
+                }
+                pending.addLast(parent)
+            }
+        }
+        return bySignature.entries.groupBy({ it.key.first }, { it.value })
+    }
+
     private fun memberFunctionCandidates(
         kmClass: kotlin.metadata.KmClass,
         ownerNode: ClassNode,
@@ -1009,19 +1088,45 @@ internal object ArtifactScanner {
     ): List<Candidate> {
         if (kmClass.visibility != Visibility.PUBLIC) return emptyList()
         if (kmClass.kind !in PROPERTY_OWNER_KINDS) return emptyList()
+        val typeParameterCount = kmClass.typeParameters.size
+        if (typeParameterCount > 0 && kmClass.isValue) return emptyList()
+        val classSubstitutions = if (typeParameterCount == 0) {
+            emptyMap()
+        } else {
+            substitutableClassTypeParameterMap(kmClass.typeParameters)
+        }
+        val classTypeArgs = if (typeParameterCount == 0) {
+            emptyList()
+        } else {
+            classSubstitutions?.let { map ->
+                kmClass.typeParameters.map { param ->
+                    renderKotlinTypeName(map[param.id] ?: return@let null, classpath, isArgument = true)
+                        ?: return@let null
+                }
+            }
+        }
         val synthesized = kmClass.functions.filter { it.kind == MemberKind.SYNTHESIZED }.mapTo(HashSet()) { it.name }
-        val functions = functionsOf(kmClass).filter { !it.isExtension && it.kotlinName !in synthesized }
+        val functions = functionsOf(kmClass, classSubstitutions ?: emptyMap())
+            .filter { !it.isExtension && it.kotlinName !in synthesized }
         if (functions.isEmpty()) return emptyList()
         val owner = binaryNameToQualified(ownerNode.name)
         val ownerType = KmType().apply { classifier = KmClassifier.Class(ownerNode.name) }
         val receiverBoundary = resolveKotlinBoundary(ownerType, classpath, BoundaryDirection.PARAMETER) ?: return emptyList()
         if (receiverBoundary.boundary.tag != OBJECT_TAG) return emptyList()
         val receiverModel = kotlinTypeModelOf(ownerType, classpath) ?: return emptyList()
-        val member = MemberReceiver(owner, receiverBoundary.boundary.read("args[0]"), receiverModel)
+        val receiverRead = if (typeParameterCount == 0) {
+            receiverBoundary.boundary.read("args[0]")
+        } else if (classTypeArgs != null) {
+            "(args[0] as $owner${classTypeArgs.joinToString(", ", "<", ">")})"
+        } else {
+            receiverBoundary.boundary.read("args[0]")
+        }
+        val member = MemberReceiver(owner, receiverRead, receiverModel, inheritedOverloadsOf(ownerNode, classpath))
         val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
             ?.let { missing -> unreachableReceiverReason(missing, owner) }
         val propertyNames = kmClass.properties.mapTo(HashSet()) { it.name }
         val methods = ownerNode.methods.associateBy { it.name to it.desc }
+        val restrictedScope = classpath.restrictsSuspensionTypeOf(ownerNode.name)
 
         return functions.mapNotNull { function ->
             val signature = function.jvmSignature.name to function.jvmSignature.descriptor
@@ -1032,26 +1137,54 @@ internal object ArtifactScanner {
                 declinedCandidate(owner, true, function, classpath, reason, composable)
                     ?.let { it.copy(declaration = member.restate(it.declaration)) }
             when {
-                function.isSuspend -> return@mapNotNull declined("suspend")
                 function.hasReifiedTypeParameter ->
                     return@mapNotNull declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
                 method == null || !method.access.hasFlag(Opcodes.ACC_PUBLIC) -> return@mapNotNull null
                 method.access.hasFlag(Opcodes.ACC_STATIC) || method.access.hasFlag(Opcodes.ACC_SYNTHETIC) ||
                     method.access.hasFlag(Opcodes.ACC_BRIDGE) -> return@mapNotNull null
+                function.isSuspend && restrictedScope != null -> return@mapNotNull declined(RESTRICTED_SUSPEND_REASON)
                 composable -> return@mapNotNull declined("a @Composable member function: not bound on a proxy")
-                kmClass.typeParameters.isNotEmpty() -> return@mapNotNull declined("a member of a generic class: not bound yet")
+                typeParameterCount > 0 && classTypeArgs == null ->
+                    return@mapNotNull declined("a member of a generic class whose type parameter has an unsupported bound")
                 function.kotlinName in propertyNames ->
                     return@mapNotNull declined("shares its name with a property of the class, which keeps the attribute")
                 receiverDecline != null -> return@mapNotNull declined(receiverDecline)
             }
-            val (paramDescriptors, _) = splitMethodDescriptor(method!!.desc)
+            val (rawParamDescriptors, _) = splitMethodDescriptor(method!!.desc)
+            val paramDescriptors = if (
+                function.isSuspend &&
+                rawParamDescriptors.lastOrNull() == "Lkotlin/coroutines/Continuation;"
+            ) {
+                rawParamDescriptors.dropLast(1)
+            } else {
+                rawParamDescriptors
+            }
             if (function.allParameterTypes.size != paramDescriptors.size) {
                 return@mapNotNull declined(
                     "the JVM signature carries ${paramDescriptors.size - function.allParameterTypes.size} " +
                         "parameter(s) metadata does not declare",
                 )
             }
-            candidateFromFunction(owner, true, function, classpath, paramDescriptors, isComposable = false, member = member)
+            // An override states no default of its own and inherits the overridden declaration's
+            // (`CornerBasedShape.copy` in `AbsoluteCutCornerShape`), so the stub and the binding of the
+            // override offer what the supertype's offer.
+            val inherited = member.inheritedOverloads[function.kotlinName].orEmpty()
+            val overridden = inherited.firstOrNull { it.parameterDescriptors == rawParamDescriptors }
+            val effective = if (overridden != null && overridden.defaults.size == function.allParameterDefaults.size) {
+                function.copy(allParameterDefaults = function.allParameterDefaults.zip(overridden.defaults) { own, base -> own || base })
+            } else {
+                function
+            }
+            // Every other inherited method of the name is an overload the generated call also sees.
+            val others = inherited.filter { it !== overridden }
+            val refused = if (others.isEmpty()) emptySet() else {
+                omittableParameterIndices(effective, 0).toList().powerSet().filter { omitted ->
+                    val written = effective.allParameterNames.indices.filter { it !in omitted }
+                        .map { effective.allParameterNames[it] to paramDescriptors[it] }
+                    omitted.isNotEmpty() && others.any { it.accepts(written) }
+                }.toSet()
+            }
+            candidateFromFunction(owner, true, effective, classpath, paramDescriptors, isComposable = false, member = member, inheritedRefusals = refused)
         }
     }
 
@@ -1132,19 +1265,36 @@ internal object ArtifactScanner {
         // own read expression (a bare class name) cannot do. A generic value class would need both,
         // and nothing measured is one.
         if (typeParameterCount > 0 && kmClass.isValue) return emptyList()
-        val unbounded = substitutableTypeParameterIds(kmClass.typeParameters)
+        val classSubstitutions = if (typeParameterCount == 0) {
+            emptyMap()
+        } else {
+            substitutableClassTypeParameterMap(kmClass.typeParameters)
+        }
+        val classTypeArgs = if (typeParameterCount == 0) {
+            emptyList()
+        } else {
+            classSubstitutions?.let { map ->
+                kmClass.typeParameters.map { param ->
+                    renderKotlinTypeName(map[param.id] ?: return@let null, classpath, isArgument = true)
+                        ?: return@let null
+                }
+            }
+        }
         val readReceiver = if (typeParameterCount == 0) receiverBoundary.boundary.read("args[0]")
         else "(args[0] as $owner${List(typeParameterCount) { "*" }.joinToString(", ", "<", ">")})"
         val writeReceiver = when {
             typeParameterCount == 0 -> receiverBoundary.boundary.read("args[0]")
-            unbounded == null -> null
-            else -> "(args[0] as $owner${List(typeParameterCount) { "kotlin.Any?" }.joinToString(", ", "<", ">")})"
+            classTypeArgs == null -> null
+            else -> "(args[0] as $owner${classTypeArgs.joinToString(", ", "<", ">")})"
         }
-        // Each class type parameter that may be read as `Any?`; a bounded one stays a type parameter,
-        // and a property mentioning it is declined by [substituteAnyFor] answering `null`.
-        val readableIds = kmClass.typeParameters.filter { parameter ->
-            substitutableTypeParameterIds(listOf(parameter)) != null
-        }.mapTo(HashSet()) { it.id }
+        val readableSubstitutions = kmClass.typeParameters.mapNotNull { parameter ->
+            val single = substitutableClassTypeParameterMap(listOf(parameter))?.get(parameter.id)
+            if (single != null && renderKotlinTypeName(single, classpath, isArgument = true) != null) {
+                parameter.id to single
+            } else {
+                null
+            }
+        }.toMap()
         // Every property is read through `(args[0] as Owner)`, which needs all of `Owner`'s
         // supertypes on the consumer's compile classpath ([unreachableSupertypeOf]).
         val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
@@ -1163,7 +1313,7 @@ internal object ArtifactScanner {
                 ownerIsClass = true,
                 receiverTypeName = owner,
                 receiverModel = receiverModel,
-                typeIds = readableIds,
+                typeSubstitutions = readableSubstitutions,
                 readAccess = { "$readReceiver.${writeParameterName(property.name)}" },
                 writeAccess = writeReceiver?.let { receiver -> { "$receiver.${writeParameterName(property.name)}" } },
                 imports = emptyList(),
@@ -1244,7 +1394,7 @@ internal object ArtifactScanner {
             ownerIsClass = false,
             receiverTypeName = kotlinClassifierNameOf(receiver) ?: return@flatMap emptyList(),
             receiverModel = receiverModel,
-            typeIds = emptySet(),
+            typeSubstitutions = emptyMap(),
             readAccess = { "${receiverBoundary.boundary.read("args[0]")}.$alias" },
             writeAccess = null,
             imports = listOf("import $owner.${property.name} as $alias"),
@@ -1272,14 +1422,14 @@ internal object ArtifactScanner {
         ownerIsClass: Boolean,
         receiverTypeName: String,
         receiverModel: KotlinTypeModel,
-        typeIds: Set<Int>,
+        typeSubstitutions: Map<Int, KmType>,
         readAccess: () -> String,
         writeAccess: (() -> String)?,
         imports: List<String>,
         receiverDecline: String? = null,
     ): List<Candidate> {
         if (!isWritableParameterName(property.name)) return emptyList()
-        val type = property.returnType.substituteAnyFor(typeIds) ?: return emptyList()
+        val type = property.returnType.substituteTypeParameters(typeSubstitutions) ?: return emptyList()
         val typeModel = kotlinTypeModelOf(type, classpath) ?: return emptyList()
         val getterModel = DeclarationModel(
             simpleName = property.name,
@@ -1930,10 +2080,7 @@ internal object ArtifactScanner {
         val declared = kotlinClassifierNameOf(type) ?: return null
         if (!declared.startsWith(KOTLIN_FUNCTION_PREFIX)) return null
         if (type.isSuspend) {
-            return FunctionSlot(
-                declineReason = "a suspend function-typed parameter ($declared): its compiled shape takes a " +
-                    "Continuation and answers COROUTINE_SUSPENDED, which no Python callable can do",
-            )
+            return suspendFunctionSlot(type, declared, classpath)
         }
         val name = functionSlotTypeName(type, declared, descriptor)
             ?: return FunctionSlot(
@@ -1961,6 +2108,86 @@ internal object ArtifactScanner {
     }
 
     /**
+     * A `suspend` function-typed parameter (SPEC U-5a; #164 item 7): on the JVM, Kotlin metadata
+     * records `suspend (A1, ..., AN) -> R` as `kotlin.Function(N+1)<A1, ..., AN, Continuation<R>, Any?>`
+     * with `type.isSuspend == true`.
+     *
+     * Supported for non-extension `suspend` function types of arities `0..5` (matching
+     * `PythonCallables.newSuspendFunction`). Extension `suspend` function types (`suspend R.() -> T`,
+     * marked by `@kotlin.ExtensionFunctionType`) are declined with a reason.
+     */
+    private fun suspendFunctionSlot(type: KmType, declared: String, classpath: ArtifactClasspath): FunctionSlot {
+        if (type.annotations.any { it.className == EXTENSION_FUNCTION_TYPE_ANNOTATION }) {
+            return FunctionSlot(
+                declineReason = "a suspend extension function-typed parameter ($declared): receiver-carrying suspend lambdas are not supported yet",
+            )
+        }
+        val jvmArity = declared.removePrefix(KOTLIN_FUNCTION_PREFIX).toIntOrNull()
+        val arguments = type.arguments
+        if (jvmArity == null || arguments.size != jvmArity + 1) {
+            return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): unexpected type argument count ${arguments.size}",
+            )
+        }
+        // On JVM metadata, a suspend function type `suspend (A1, ..., AN) -> R` is stored as
+        // `Function(N+1)<A1, ..., AN, kotlin.coroutines.Continuation<R>, kotlin.Any?>`: the second-to-last
+        // type argument is `Continuation<R>` and the last is `Any?`. Unwrap `Continuation<R>` to
+        // recover the true Kotlin parameter list `(A1, ..., AN)` and return type `R`.
+        val continuationType = arguments.getOrNull(arguments.size - 2)?.type
+        val isLoweredContinuation = continuationType != null &&
+            kotlinClassifierNameOf(continuationType) == CONTINUATION_CLASS_NAME &&
+            continuationType.arguments.size == 1
+        val logicalArgProjections: List<kotlin.metadata.KmTypeProjection>
+        val logicalRetProjection: kotlin.metadata.KmTypeProjection
+        if (isLoweredContinuation) {
+            logicalArgProjections = arguments.dropLast(2)
+            logicalRetProjection = continuationType!!.arguments[0]
+        } else {
+            logicalArgProjections = arguments.dropLast(1)
+            logicalRetProjection = arguments.last()
+        }
+        val logicalArity = logicalArgProjections.size
+        if (logicalArity !in 0..MAX_SUSPEND_FUNCTION_ARITY) {
+            return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): only arities 0..$MAX_SUSPEND_FUNCTION_ARITY are supported",
+            )
+        }
+        val logicalProjections = logicalArgProjections + logicalRetProjection
+        val classifierNames = logicalProjections.map { projection ->
+            val argType = projection.type ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): a type argument is a star projection",
+            )
+            kotlinClassifierNameOf(argType) ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): a type argument has no name a proxy could be built over",
+            )
+        }
+        val renderedTypes = logicalProjections.map { projection ->
+            if (projection.variance != KmVariance.INVARIANT) {
+                return FunctionSlot(
+                    declineReason = "a suspend function-typed parameter ($declared): use-site variance is not supported",
+                )
+            }
+            val argType = projection.type ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): a type argument is a star projection",
+            )
+            renderKotlinSourceType(argType, classpath, depth = 1) ?: return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): some part of its signature is not a nameable public type",
+            )
+        }
+        val slotName = "kotlin.coroutines.SuspendFunction$logicalArity(" +
+            classifierNames.dropLast(1).joinToString(",") + ")" + FUNCTION_RETURNS + classifierNames.last()
+        val renderedArgs = renderedTypes.dropLast(1).joinToString(", ")
+        val renderedRet = renderedTypes.last()
+        val nullableSuffix = if (type.isNullable) "?" else ""
+        val castTarget = "(suspend ($renderedArgs) -> $renderedRet)$nullableSuffix"
+        return FunctionSlot(typeName = slotName, boundary = BoundaryType("OBJECT", "(%s as $castTarget)", "(%s)"))
+    }
+
+    private const val MAX_SUSPEND_FUNCTION_ARITY = 5
+    private const val EXTENSION_FUNCTION_TYPE_ANNOTATION = "kotlin/ExtensionFunctionType"
+    private const val CONTINUATION_CLASS_NAME = "kotlin.coroutines.Continuation"
+
+    /**
      * A parameter typed as a **functional interface** (issue #216): a Java interface with one abstract
      * method (`java.lang.Runnable`) or a Kotlin `fun interface`, whose method returns `Unit` and which is
      * not generic. `null` for anything else, which leaves the parameter exactly as it was -- an
@@ -1983,11 +2210,9 @@ internal object ArtifactScanner {
         val classifier = type.classifier as? KmClassifier.Class ?: return null
         val internal = classifier.name
         if (internal.startsWith(KOTLIN_FUNCTION_INTERNAL_PREFIX)) return null
-        if (type.arguments.isNotEmpty()) return null
         val binary = internal.replace('.', '$')
         val node = classpath.classNode(binary) ?: jdkClassNode(binary) ?: return null
         if (!node.access.hasFlag(Opcodes.ACC_INTERFACE) || !node.access.hasFlag(Opcodes.ACC_PUBLIC)) return null
-        if (node.signature?.startsWith("<") == true) return null
         val kmClass = when (val metadata = kotlinClassMetadataOf(node)) {
             null -> null
             is KotlinClassMetadata.Class -> metadata.kmClass.takeIf { it.isFunInterface } ?: return null
@@ -1995,6 +2220,19 @@ internal object ArtifactScanner {
         }
         val method = abstractMethodsOf(node, classpath)?.singleOrNull() ?: return null
         val (descriptors, returns) = splitMethodDescriptor(method.desc)
+        val qualified = internal.replace('/', '.')
+
+        // SPEC U-5c (#164 item 3): Kotlin `fun interface` whose single abstract method is `suspend`
+        // (including generic ones like `kotlinx.coroutines.flow.FlowCollector<in T>`).
+        if (kmClass != null) {
+            val declared = kmClass.functions.singleOrNull { it.name == method.name }
+            if (declared != null && declared.isSuspend) {
+                return suspendSamSlotOrNull(type, kmClass, declared, qualified, classpath)
+            }
+        }
+
+        if (type.arguments.isNotEmpty()) return null
+        if (node.signature?.startsWith("<") == true) return null
         if (returns != "V") return null
         // A Kotlin `fun interface` says each parameter's nullability; a Java one does not, so an object
         // parameter is taken as nullable there -- Java may pass `null`, and a non-null type would throw.
@@ -2008,7 +2246,6 @@ internal object ArtifactScanner {
         } else {
             descriptors.map { descriptor -> javaParameterTypeOf(descriptor, classpath) ?: return null }
         }
-        val qualified = internal.replace('/', '.')
         val arity = parameterTypes.size
         val functionType = "kotlin.Function$arity<" + (parameterTypes.map { it.second } + UNIT_TYPE_NAME).joinToString(", ") + ">"
         val star = "kotlin.Function$arity<" + List(arity + 1) { "*" }.joinToString(", ") + ">"
@@ -2026,6 +2263,85 @@ internal object ArtifactScanner {
                 arguments = parameterTypes.map { KotlinTypeModel(it.first) } + KotlinTypeModel(UNIT_TYPE_NAME),
             ),
         )
+    }
+
+    /**
+     * Builds a SAM slot for a Kotlin `fun interface` whose single abstract method is `suspend`
+     * (SPEC U-5c, #164 item 3), such as `kotlinx.coroutines.flow.FlowCollector<in T>`.
+     */
+    private fun suspendSamSlotOrNull(
+        type: KmType,
+        kmClass: kotlin.metadata.KmClass,
+        declared: kotlin.metadata.KmFunction,
+        qualified: String,
+        classpath: ArtifactClasspath,
+    ): FunctionSlot? {
+        val arity = declared.valueParameters.size
+        if (arity !in 0..MAX_SUSPEND_FUNCTION_ARITY) return null
+        if (type.arguments.size != kmClass.typeParameters.size) return null
+        val typeParamSubst = LinkedHashMap<Int, KmType>(kmClass.typeParameters.size)
+        val renderedInterfaceArgs = ArrayList<String>(kmClass.typeParameters.size)
+        for (i in kmClass.typeParameters.indices) {
+            val argType = type.arguments[i].type ?: nullableAnyType()
+            typeParamSubst[kmClass.typeParameters[i].id] = argType
+            renderedInterfaceArgs += renderKotlinSourceType(argType, classpath, depth = 0) ?: return null
+        }
+        val parameterTypes = declared.valueParameters.map { parameter ->
+            val resolved = substituteKmTypeParams(parameter.type, typeParamSubst) ?: return null
+            val name = kotlinClassifierNameOf(resolved) ?: return null
+            val source = renderKotlinSourceType(resolved, classpath, depth = 0) ?: return null
+            name to source
+        }
+        val resolvedReturn = substituteKmTypeParams(declared.returnType, typeParamSubst) ?: return null
+        val returnName = kotlinClassifierNameOf(resolvedReturn) ?: return null
+        val returnSource = renderKotlinSourceType(resolvedReturn, classpath, depth = 0) ?: return null
+
+        val interfaceType = if (renderedInterfaceArgs.isEmpty()) {
+            qualified
+        } else {
+            "$qualified<${renderedInterfaceArgs.joinToString(", ")}>"
+        }
+        val suspendFnType = "(suspend (${parameterTypes.joinToString(", ") { it.second }}) -> $returnSource)"
+        val fnCheck = "kotlin.Function${arity + 1}<" + List(arity + 2) { "*" }.joinToString(", ") + ">"
+        val names = (0 until arity).map { "p$it" }
+        val arrow = if (arity == 0) "" else names.joinToString(", ", postfix = " -> ")
+        val convert = "v -> if (v is $fnCheck) $interfaceType { $arrow(v as $suspendFnType).invoke(${names.joinToString(", ")}) } else v as $interfaceType"
+        val read = if (type.isNullable) "((%s)?.let { $convert })" else "((%s).let { $convert })"
+        return FunctionSlot(
+            typeName = qualified + SAM_SEPARATOR + "kotlin.coroutines.SuspendFunction" + arity +
+                "(" + parameterTypes.joinToString(",") { it.first } + ")" + FUNCTION_RETURNS + returnName,
+            boundary = BoundaryType("OBJECT", read, "(%s)"),
+            modelType = KotlinTypeModel(
+                "kotlin.coroutines.SuspendFunction$arity",
+                isNullable = type.isNullable,
+                arguments = parameterTypes.map { KotlinTypeModel(it.first) } + KotlinTypeModel(returnName),
+            ),
+        )
+    }
+
+    private fun substituteKmTypeParams(type: KmType, substitutions: Map<Int, KmType>): KmType? {
+        if (substitutions.isEmpty()) return type
+        val own = type.classifier
+        if (own is KmClassifier.TypeParameter) {
+            return substitutions[own.id]
+        }
+        if (type.arguments.isEmpty()) return type
+        val copy = KmType()
+        copy.classifier = own
+        copy.isNullable = type.isNullable
+        copy.isSuspend = type.isSuspend
+        for (projection in type.arguments) {
+            val arg = projection.type
+            copy.arguments += if (arg == null) {
+                projection
+            } else {
+                kotlin.metadata.KmTypeProjection(
+                    projection.variance,
+                    substituteKmTypeParams(arg, substitutions) ?: return null,
+                )
+            }
+        }
+        return copy
     }
 
     /** Separates a functional-interface slot's interface from the function type a callable fills it as
@@ -2347,6 +2663,8 @@ internal object ArtifactScanner {
         paramDescriptors: List<String>,
         isComposable: Boolean,
         member: MemberReceiver? = null,
+        /** Omission sets an inherited overload of a member would also accept (see [memberFunctionCandidates]). */
+        inheritedRefusals: Set<Set<Int>> = emptySet(),
     ): Candidate? {
         val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable)
             ?.let { if (member != null) member.restate(it) else it }
@@ -2430,14 +2748,20 @@ internal object ArtifactScanner {
         // property of a package that one file does not see (this object's KDoc, and
         // `docs/design/kotlin-extensions-in-python.md` §2.5's 11 split pairs). [applyDefaultOmission] runs
         // over the finished walk and fills this in.
+        val wrappedCall = returnType.wrapReturn(call)
+        val bodyExpr = if (function.isSuspend) {
+            "python.multiplatform.ffi.upcall.PendingCall.start { $wrappedCall }"
+        } else {
+            wrappedCall
+        }
         val callable = ArtifactCallable(
             name = qualifiedName,
             arity = arity,
             paramTags = resolvedParams.map { it.tag },
             returnTag = returnType.tag,
             // A member reads its receiver out of `args[0]` even with no declared parameter.
-            lambdaBody = if (arity == 0 && member == null) "{ ${returnType.wrapReturn(call)} }"
-            else "{ args -> ${returnType.wrapReturn(call)} }",
+            lambdaBody = if (arity == 0 && member == null) "{ $bodyExpr }"
+            else "{ args -> $bodyExpr }",
             imports = imports,
             receiverTypeName = member?.owner ?: function.receiverType?.let { kotlinClassifierNameOf(it) },
             paramNames = function.allParameterNames,
@@ -2448,10 +2772,11 @@ internal object ArtifactScanner {
             // statement about **this body**, and this body passes everything.
             paramHasDefault = List(resolvedParams.size) { false },
             kind = if (member != null) METHOD_KIND else "FUNCTION",
+            isSuspend = function.isSuspend,
         )
-        // A member's defaults are not omittable yet (issue #215): no plan, so Python passes every
-        // argument and the stub says so.
-        val omittable = if (member != null) emptySet() else omittableParameterIndices(function, receiverIndex)
+        // A member's defaults are omittable like a function's (#164 item 4: `Job.cancel()`); an
+        // override's are the overridden declaration's, already folded into [function].
+        val omittable = omittableParameterIndices(function, receiverIndex)
         val modelParameters = model.parameters.mapIndexed { index, parameter ->
             functionSlots[index + receiverIndex]?.modelType?.let { parameter.copy(type = it) } ?: parameter
         }
@@ -2469,12 +2794,17 @@ internal object ArtifactScanner {
                 omittable = omittable.sorted(),
                 valueIndices = (receiverIndex until resolvedParams.size).toList(),
                 declaredDefaults = function.allParameterDefaults,
+                refused = inheritedRefusals,
                 buildBody = { allowed ->
                     val branched = presenceBranchedCall(
                         function, owner, alias, argumentExpressions, receiverIndex,
                         qualifiedName, omittable.sorted(), call, allowed,
+                        memberRead = member?.read, argumentOffset = firstArgument,
                     )
-                    "{ args -> ${returnType.wrapReturn(branched)} }"
+                    // A suspend declaration's branches run inside its pending call, like the all-present body.
+                    val wrapped = returnType.wrapReturn(branched)
+                    if (function.isSuspend) "{ args -> python.multiplatform.ffi.upcall.PendingCall.start { $wrapped } }"
+                    else "{ args -> $wrapped }"
                 },
             ),
         )
@@ -2505,6 +2835,8 @@ internal object ArtifactScanner {
         /** What the *declaration* says, as opposed to what the binding will offer -- the sibling test
          * needs Kotlin's own view, because Kotlin is what resolves the generated call. */
         val declaredDefaults: List<Boolean>,
+        /** Omission sets refused up front because an inherited overload of a member also accepts them. */
+        val refused: Set<Set<Int>> = emptySet(),
         /** @param allowed the omission sets to generate a call for. Everything else becomes a branch
          *   that refuses at run time; see [presenceBranchedCall]. */
         val buildBody: (allowed: Set<Set<Int>>) -> String,
@@ -2592,12 +2924,20 @@ internal object ArtifactScanner {
     internal fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
         if (candidates.none { it.plan != null }) return candidates
         val byName = candidates.filter { it.callable != null }.groupBy { it.callable!!.name }
+        // A declined overload is still one Kotlin resolves the generated call against
+        // (`PlatformInsets(getLeft: () -> Int = ..., ...)` beside the bound `PlatformInsets(left: Int = ...)`
+        // in Compose's ui klib, #191): it joins the test by its declaration.
+        val declinedByName = candidates.filter { it.callable == null }
+            .groupBy { "${it.declaration.owner}.${it.declaration.simpleName}" }
         return candidates.map { candidate ->
             val plan = candidate.plan ?: return@map candidate
             val callable = candidate.callable ?: return@map candidate
             val siblings = byName[callable.name].orEmpty().filter { it !== candidate }
             val allowed = plan.omittable.powerSet()
-                .filter { it.isNotEmpty() && !anySiblingAlsoAccepts(candidate, plan, siblings, it) }
+                .filter {
+                    it.isNotEmpty() && it !in plan.refused && !anySiblingAlsoAccepts(candidate, plan, siblings, it) &&
+                        !anyDeclinedSiblingMayAccept(candidate, plan, declinedByName[callable.name].orEmpty(), it)
+                }
                 .toSet()
             if (allowed.isEmpty()) return@map candidate.copy(plan = null)
             val omittableNow = plan.omittable.filter { index -> allowed.any { index in it } }.toSet()
@@ -2646,11 +2986,34 @@ internal object ArtifactScanner {
         }
     }
 
+    /**
+     * [anySiblingAlsoAccepts] for overloads the walker declined, read from their declarations. Matched by
+     * parameter **name** only: a declined declaration's types are not always nameable (a function type,
+     * a type parameter), so a name match is taken as a possible match. That can only refuse a branch the
+     * exact test would have allowed, which costs a spelling, never a call that does not compile.
+     */
+    private fun anyDeclinedSiblingMayAccept(
+        candidate: Candidate,
+        plan: DefaultOmissionPlan,
+        declined: List<Candidate>,
+        omitted: Set<Int>,
+    ): Boolean {
+        val callable = candidate.callable ?: return false
+        val written = plan.valueIndices.filter { it !in omitted }.map { callable.paramNames[it] }
+        return declined.any { sibling ->
+            val declaration = sibling.declaration
+            if (declaration.receiver?.qualifiedName != callable.receiverTypeName) return@any false
+            val parameters = declaration.parameters
+            written.all { name -> parameters.any { it.name == name } } &&
+                parameters.filter { it.name !in written }.all { it.declaresDefault }
+        }
+    }
+
     /** The sibling's *declared* defaults, which is Kotlin's view and therefore the one that decides
      * applicability. `ArtifactCallable.paramHasDefault` is the binding's view and is not it -- at
      * this point in the walk it is still all `false` for everyone. */
     private fun DefaultOmissionPlan.siblingDeclares(sibling: Candidate, index: Int): Boolean {
-        val receiverIndex = if (sibling.callable?.receiverTypeName != null) 1 else 0
+        val receiverIndex = if (sibling.callable?.receiverTypeName != null && sibling.callable?.kind == "FUNCTION") 1 else 0
         return sibling.declaration.parameters.getOrNull(index - receiverIndex)?.declaresDefault ?: false
     }
 
@@ -2680,10 +3043,14 @@ internal object ArtifactScanner {
         ordered: List<Int>,
         allPresentCall: String,
         allowed: Set<Set<Int>>,
+        /** A member's receiver read (`(args[0] as Owner)`), or `null` for a function. */
+        memberRead: String? = null,
+        /** Where parameter 0 sits in `args`: 1 for a member, whose receiver is `args[0]`. */
+        argumentOffset: Int = 0,
     ): String {
         val names = function.allParameterNames
         val subject = ordered.mapIndexed { bit, index ->
-            "(if (args[$index] == null) ${1 shl bit} else 0)"
+            "(if (args[${index + argumentOffset}] == null) ${1 shl bit} else 0)"
         }.joinToString(" + ")
 
         fun callOmitting(omitted: Set<Int>): String {
@@ -2691,8 +3058,11 @@ internal object ArtifactScanner {
                 .filter { it >= receiverIndex && it !in omitted }
                 .joinToString(", ") { "${writeParameterName(names[it])} = ${argumentExpressions[it]}" }
             val typeArguments = typeArgumentsOf(function)
-            return if (function.isExtension) "${argumentExpressions.first()}.$alias$typeArguments($arguments)"
-            else "$owner.${function.kotlinName}$typeArguments($arguments)"
+            return when {
+                memberRead != null -> "$memberRead.${function.kotlinName}$typeArguments($arguments)"
+                function.isExtension -> "${argumentExpressions.first()}.$alias$typeArguments($arguments)"
+                else -> "$owner.${function.kotlinName}$typeArguments($arguments)"
+            }
         }
 
         val last = (1 shl ordered.size) - 1

@@ -13,7 +13,10 @@ plugins {
 
 // One published version for every artifact (#70): "$pythonVersion-$libraryVersionSuffix", the same
 // value python-multiplatform and the included Gradle-plugin build derive from gradle.properties.
-val publishedVersion = "${property("pythonVersion")}-${property("libraryVersionSuffix")}"
+// An empty suffix is the stable release ("3.15.0"); owner decision 2026-11-21 (team report pmp-binder.md,
+// "## Owner answers"): alpha03 -> 3.15.0-rc1 -> 3.15.0, library-only follow-ups 3.15.0-1, 3.15.0-2.
+val publishedVersion = listOf(property("pythonVersion").toString(), property("libraryVersionSuffix").toString())
+    .filter { it.isNotEmpty() }.joinToString("-")
 
 allprojects {
     group = "org.thisisthepy"

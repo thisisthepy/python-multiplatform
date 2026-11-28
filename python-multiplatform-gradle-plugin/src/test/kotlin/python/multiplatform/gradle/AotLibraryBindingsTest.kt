@@ -1,5 +1,6 @@
 package python.multiplatform.gradle
 
+import groovy.json.JsonSlurper
 import org.gradle.api.GradleException
 import org.gradle.testfixtures.ProjectBuilder
 import kotlin.test.Test
@@ -11,7 +12,7 @@ import kotlin.test.assertTrue
 /**
  * The Kotlin generator for a TypedPython AOT library (SPEC N-17, #458): `<prefix>.json` in, Kotlin text out.
  *
- * The description below is written by hand in the format of `typedpython/aot/library.py` (abi_version 2) and holds
+ * The description below is written by hand in the format of `typedpython/aot/library.py` (abi_version 3) and holds
  * every type of the boundary vocabulary: scalars, both lists, a tuple return, a None return, and parameter and
  * function names that are Kotlin hard keywords. The expected text is asserted on signatures, on the carrier
  * descriptor of each symbol, on the status check and exception path, and on the rules the desktop FFM code of this
@@ -20,7 +21,7 @@ import kotlin.test.assertTrue
  */
 class AotLibraryBindingsTest {
 
-    private fun description(abi: Int = 2, extraFunction: String = ""): String = """
+    private fun description(abi: Int = 3, extraFunction: String = ""): String = """
         {
           "prefix": "kit",
           "library": "libkit.dylib",
@@ -325,18 +326,115 @@ class AotLibraryBindingsTest {
         assertTrue(r.message!!.contains("`give`"), r.message)
     }
 
+    // --- dicts (abi_version 3, #443) --------------------------------------------------------------------
+
+    private fun dictEntry(type: String, value: String) = """
+        "$type": {"key": "i64", "value": "$value", "new": "kit_${type}_new", "set": "kit_${type}_set",
+                  "get": "kit_${type}_get", "contains": "kit_${type}_contains", "next": "kit_${type}_next",
+                  "len": "kit_${type}_len", "retain": "kit_${type}_retain", "release": "kit_${type}_release"}
+    """.trimIndent()
+
+    private val dictFunctions = ",\n" + """
+        {"name": "counts", "symbol": "kit_counts", "line": 21,
+         "params": [{"name": "xs", "type": "i64_list"}], "returns": ["dict_i64_i64"]},
+        {"name": "scaled", "symbol": "kit_scaled", "line": 22,
+         "params": [{"name": "d", "type": "dict_i64_f64"}, {"name": "f", "type": "f64"}], "returns": ["dict_i64_f64"]},
+        {"name": "true_count", "symbol": "kit_true_count", "line": 23,
+         "params": [{"name": "d", "type": "dict_i64_bool"}], "returns": ["i64"]}
+    """.trimIndent()
+
+    // The last two braces close "lists" and the description. Anchored on them, not on their indentation: the
+    // interpolated functions change what trimIndent strips. A missed anchor is an error,
+    // never a description silently left without "dicts".
+    private fun withDicts(): String {
+        val plain = description(extraFunction = dictFunctions)
+        val end = Regex("""}\s*}\s*$""").find(plain) ?: error("the description does not end in two braces")
+        return plain.substring(0, end.range.first) + "},\n  \"dicts\": {\n" + listOf(
+            dictEntry("dict_i64_i64", "i64"), dictEntry("dict_i64_f64", "f64"), dictEntry("dict_i64_bool", "bool"),
+        ).joinToString(",\n") + "\n  }\n}"
+    }
+
+    @Test
+    fun aDictIsAParameterAndAResultWithOneClassPerKind() {
+        val files = render(json = withDicts())
+        assertEquals(
+            listOf("AotFfm.kt", "Kit.kt", "F64List.kt", "I64List.kt", "DictI64I64.kt", "DictI64F64.kt", "DictI64Bool.kt"),
+            files.keys.toList(),
+        )
+        val kit = files.getValue("Kit.kt")
+        assertTrue(kit.contains("    fun counts(xs: I64List): DictI64I64 {"), kit)
+        assertTrue(kit.contains("    fun scaled(d: DictI64F64, f: Double): DictI64F64 {"), kit)
+        assertTrue(kit.contains("    fun true_count(d: DictI64Bool): Long {"), kit)
+        assertTrue(kit.contains("f_scaled.invokeExact(d.pointer(), f, __out) as Int"), kit)
+        assertTrue(kit.contains("return DictI64I64.owned(__h, __h.rt.readLong(__out))"), kit)
+        for ((symbol, descriptor) in mapOf(
+            "kit_dict_i64_i64_new" to "()J", "kit_dict_i64_i64_set" to "(JJJ)I", "kit_dict_i64_f64_set" to "(JJD)I",
+            "kit_dict_i64_bool_set" to "(JJB)I", "kit_dict_i64_f64_get" to "(JJJ)I", "kit_dict_i64_bool_contains" to "(JJ)I",
+            "kit_dict_i64_i64_next" to "(JJJJ)I", "kit_dict_i64_f64_len" to "(J)J", "kit_dict_i64_bool_release" to "(J)V",
+            "kit_scaled" to "(JDJ)I", "kit_counts" to "(JJ)I",
+        )) {
+            assertTrue(kit.contains("rt.downcall(\"$symbol\", \"$descriptor\")"), "$symbol should be bound as $descriptor:\n$kit")
+        }
+        assertTrue(kit.contains("\"dictI64BoolNext\" to dictI64BoolNext,"), kit)
+    }
+
+    @Test
+    fun theDictClassesAreReadOnlyAndKeepTheLibrarysErrors() {
+        val files = render(json = withDicts())
+        val f = files.getValue("DictI64F64.kt")
+        assertTrue(f.contains("class DictI64F64 private constructor(private val lib: Kit.Handles, pointer: Long) : AutoCloseable {"), f)
+        assertTrue(f.contains("operator fun get(key: Long): Double? {"), f)
+        assertTrue(f.contains("if (e.className == \"KeyError\") return null"), f)
+        assertTrue(f.contains("fun containsKey(key: Long): Boolean {"), f)
+        assertTrue(f.contains("fun toMap(): Map<Long, Double> {"), f)
+        assertTrue(f.contains("lib.dictI64F64Next.invokeExact(p, s, s + 8L, s + 16L) as Int"), f)
+        assertTrue(f.contains("fun of(items: Map<Long, Double>): DictI64F64 {"), f)
+        assertTrue(f.contains("lib.dictI64F64Set.invokeExact(pointer, k, v) as Int"), f)
+        assertFalse(f.contains("operator fun set("), "no write from Kotlin")
+        assertFalse(f.contains(".invoke("), "no inexact invoke")
+        val b = files.getValue("DictI64Bool.kt")
+        assertTrue(b.contains("lib.dictI64BoolSet.invokeExact(pointer, k, (if (v) 1 else 0).toByte()) as Int"), b)
+        assertTrue(b.contains("return lib.rt.readByte(out).toInt() != 0"), b)
+        assertTrue(files.getValue("DictI64I64.kt").contains("operator fun get(key: Long): Long? {"))
+        assertTrue(f.contains("never writes a dict"), "the sharing rule is documented")
+    }
+
+    @Test
+    fun aDescriptionWithoutDictsGeneratesNoDictClassAndTheirDescriptorsAreAdded() {
+        assertFalse(render().values.any { it.contains("Dict") }, "no dict in a library without one")
+        val plain = aotDowncallDescriptors(parseAotLibraryDescription(description()))
+        val withD = aotDowncallDescriptors(parseAotLibraryDescription(withDicts()))
+        assertFalse(plain.any { it.parameterTypes.isEmpty() && it.returnType == "long" })
+        assertTrue(AotForeignDescriptor("long", emptyList()) in withD, withD.toString())
+        assertTrue(AotForeignDescriptor("int", listOf("long", "long", "double")) in withD, withD.toString())
+        assertTrue(AotForeignDescriptor("int", listOf("long", "long", "byte")) in withD, withD.toString())
+        assertTrue(AotForeignDescriptor("int", listOf("long", "long", "long", "long")) in withD, withD.toString())
+    }
+
+    @Test
+    fun aDictTypeWithoutItsEntryOrWithTheWrongValueFails() {
+        val e = assertFailsWith<GradleException> { parseAotLibraryDescription(description(extraFunction = dictFunctions)) }
+        assertTrue(e.message!!.contains("`counts`") && e.message!!.contains("dict_i64_i64"), e.message)
+        val wrong = withDicts().replace("\"dict_i64_f64\": {\"key\": \"i64\", \"value\": \"f64\"",
+            "\"dict_i64_f64\": {\"key\": \"i64\", \"value\": \"i64\"")
+        assertFailsWith<GradleException> { parseAotLibraryDescription(wrong) }
+        for (name in listOf("DictI64I64", "DictI64F64", "DictI64Bool")) {
+            assertFailsWith<GradleException> { render(name = name) }
+        }
+    }
+
     // --- task failures --------------------------------------------------------------------------------
 
     @Test
     fun aWrongAbiVersionIsAClearFailure() {
-        // Version 1 is rejected too: no version 1 library is deployed and the compiler writes 2 only.
-        for (wrong in listOf(1, 3)) {
+        // Versions 1 and 2 are rejected too: no library of an earlier version is deployed and the compiler writes 3 only.
+        for (wrong in listOf(1, 2, 4)) {
             val e = assertFailsWith<GradleException> { parseAotLibraryDescription(description(abi = wrong)) }
             assertTrue(e.message!!.contains("abi_version $wrong"), e.message)
-            assertTrue(e.message!!.contains("reads abi_version 2 only"), e.message)
+            assertTrue(e.message!!.contains("reads abi_version 3 only"), e.message)
         }
-        assertEquals(2, AOT_LIBRARY_ABI_VERSION)
-        assertFailsWith<GradleException> { parseAotLibraryDescription(description().replace("\"abi_version\": 2,", "")) }
+        assertEquals(3, AOT_LIBRARY_ABI_VERSION)
+        assertFailsWith<GradleException> { parseAotLibraryDescription(description().replace("\"abi_version\": 3,", "")) }
     }
 
     @Test
@@ -385,5 +483,115 @@ class AotLibraryBindingsTest {
 
         json.writeText(description(abi = 1))
         assertFailsWith<GradleException> { task.generate() }
+    }
+
+    // --- GraalVM native-image reachability metadata (#456) -----------------------------------------------
+
+    private fun parseDowncallsFromMetadata(json: String): Set<AotForeignDescriptor> {
+        val start = json.indexOf("\"downcalls\": [")
+        assertTrue(start >= 0, "reachability metadata has no `downcalls` array:\n$json")
+        var depth = 0
+        var end = -1
+        for (i in json.indexOf('[', start) until json.length) {
+            if (json[i] == '[') depth++
+            if (json[i] == ']') {
+                depth--
+                if (depth == 0) {
+                    end = i
+                    break
+                }
+            }
+        }
+        assertTrue(end > start, "reachability metadata's `downcalls` array is not closed")
+        val body = json.substring(start, end)
+        return Regex("""\{\s*"returnType"\s*:\s*"([\w ]+)"\s*,\s*"parameterTypes"\s*:\s*\[([^]]*)]\s*}""")
+            .findAll(body)
+            .mapTo(LinkedHashSet()) { match ->
+                AotForeignDescriptor(
+                    aotCarrierNameOfGraalLayout(match.groupValues[1]),
+                    match.groupValues[2].split(',').map { it.trim().trim('"') }.filter { it.isNotEmpty() }
+                        .map(::aotCarrierNameOfGraalLayout),
+                )
+            }
+    }
+
+    @Test
+    fun theReachabilityMetadataDeclaresEveryDowncallDescriptorOfTheGeneratedHandles() {
+        for (json in listOf(description(), withIntList())) {
+            val desc = parseAotLibraryDescription(json)
+            val kit = render(json = json).getValue("Kit.kt")
+            val handleDescriptors = Regex("""rt\.downcall\("[^"]+",\s*"([^"]+)"\)""")
+                .findAll(kit)
+                .mapTo(LinkedHashSet()) { aotParseDescriptorSignature(it.groupValues[1]) }
+            assertTrue(handleDescriptors.isNotEmpty(), "no downcall handles found in Kit.kt")
+
+            val metadata = renderAotReachabilityMetadata(desc)
+            val metadataDescriptors = parseDowncallsFromMetadata(metadata)
+            assertEquals(handleDescriptors, metadataDescriptors)
+
+            // Negative control (AGENTS.md 8): dropping any one descriptor leaves a handle unmatched.
+            for (dropped in metadataDescriptors) {
+                val withoutOne = metadataDescriptors - dropped
+                assertTrue(
+                    handleDescriptors.any { it !in withoutOne },
+                    "check stayed green after dropping $dropped",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun theReachabilityMetadataRegistersTheForeignReflectionSurface() {
+        val ffm = render().getValue("AotFfm.kt")
+        assertFalse(ffm.contains("foreign(\""), "AotFfm must use Class.forName string literals for native-image analysis")
+        val classLiterals = Regex("""Class\.forName\("([^"]+)"\)""")
+            .findAll(ffm)
+            .mapTo(LinkedHashSet()) { it.groupValues[1].replace("\\$", "$") }
+        assertEquals(11, classLiterals.size, "expected 11 java.lang.foreign Class.forName literals: $classLiterals")
+
+        val metadata = renderAotReachabilityMetadata(parseAotLibraryDescription(description()))
+        @Suppress("UNCHECKED_CAST")
+        val parsed = JsonSlurper().parseText(metadata) as Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val reflection = (parsed["reflection"] as List<Map<String, Any?>>).associateBy { it["type"] as String }
+
+        for (cls in classLiterals) {
+            val entry = reflection[cls]
+            assertTrue(entry != null, "reflection metadata is missing $cls")
+            assertEquals(true, entry["allPublicMethods"], "$cls should set allPublicMethods=true")
+        }
+        assertEquals(true, reflection["java.lang.foreign.MemorySegment"]?.get("allPublicFields"))
+        assertEquals(true, reflection["java.lang.foreign.ValueLayout"]?.get("allPublicFields"))
+        assertTrue("java.lang.foreign.Linker\$Option[]" in reflection, "array type for ReflectArray.newInstance missing")
+        assertTrue("java.lang.foreign.MemoryLayout[]" in reflection, "array type for ReflectArray.newInstance missing")
+    }
+
+    @Test
+    fun theTaskWritesReachabilityMetadataIntoResourceOutputDirectoryWhenConfigured() {
+        val project = ProjectBuilder.builder().build()
+        val json = project.file("kit.json").apply { writeText(withIntList()) }
+        val srcOut = project.layout.buildDirectory.dir("generated/aot/kit")
+        val resOut = project.layout.buildDirectory.dir("generated/aot-resources/kit")
+        val task = project.tasks.register("generateKitWithMetadata", GenerateAotLibraryBindingsTask::class.java) {
+            descriptionFile.set(json)
+            packageName.set("fixture.kit")
+            objectName.set("Kit")
+            outputDirectory.set(srcOut)
+            resourceOutputDirectory.set(resOut)
+        }.get()
+        task.generate()
+
+        val metadataFile = resOut.get().asFile.resolve("META-INF/native-image/fixture.kit/kit/reachability-metadata.json")
+        assertTrue(metadataFile.isFile, "expected $metadataFile to be generated")
+        val metadata = metadataFile.readText(Charsets.UTF_8)
+        assertEquals(
+            aotDowncallDescriptors(parseAotLibraryDescription(withIntList())).toSet(),
+            parseDowncallsFromMetadata(metadata),
+        )
+
+        val stale = resOut.get().asFile.resolve("stale.txt").apply { writeText("old") }
+        task.generate()
+        assertFalse(stale.exists(), "stale resource file should be cleaned on re-run")
+        assertTrue(metadataFile.isFile)
     }
 }

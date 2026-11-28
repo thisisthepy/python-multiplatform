@@ -16,6 +16,7 @@ import java.lang.reflect.InvocationTargetException
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.Properties
+import java.util.zip.ZipFile
 import java.io.File
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -68,8 +69,10 @@ val configuredPythonVersion = project.property("pythonVersion").toString()
 // `-PpythonFreeThreaded` switch that used to choose it is gone. Android (arm64-v8a, x86_64),
 // androidNative and iOS embed the project's own 3.15t builds from the GitHub release
 // `cpython-<version>t-mobile` (#328; leader 2026-11-13: no opt-in flag on mobile, 3.15t is the
-// only build). Only wasm still embeds a GIL build, until #175. Which build each platform embeds is
-// the `embedsFreeThreadedPython` expect/actual in the library, not a build-wide flag.
+// only build). wasm embeds the project's own 3.15t with pthreads, built by
+// `python-multiplatform/scripts/wasm/build-cpython.sh` (#175; leader, Decision 10 (a) a1, 2026-11-26).
+// Which build each platform embeds is the `embedsFreeThreadedPython` expect/actual in the library,
+// not a build-wide flag.
 if (project.findProperty("pythonFreeThreaded") != null) {
     throw GradleException(
         "-PpythonFreeThreaded was removed (issue #158): desktop always embeds the free-threaded " +
@@ -79,7 +82,8 @@ if (project.findProperty("pythonFreeThreaded") != null) {
 val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20261013"
 
 val pythonVersion = configuredPythonVersion
-val libraryVersion = "$pythonVersion-${project.property("libraryVersionSuffix")}"   // the root's publishedVersion (#70)
+val libraryVersion = listOf(pythonVersion, project.property("libraryVersionSuffix").toString())
+    .filter { it.isNotEmpty() }.joinToString("-")   // the root's publishedVersion (#70); empty suffix = stable
 version = libraryVersion
 
 buildkonfig {
@@ -694,22 +698,20 @@ extensions.add(
  * `docs/platforms/python-version-acquisition.md` "Published version".
  *
  * Per platform since #158: the desktop jar, the AAR and every Kotlin/Native klib (macosArm64,
- * linuxX64, iOS, androidNative) embed 3.15t (#158, #328); only wasm still embeds a GIL build, until
- * #175. So the free-threaded attribute is decided per published variant (false on the wasm ones),
- * and the jar and the AAR each get their own resource. Shared metadata variants carry no CPython and
+ * linuxX64, iOS, androidNative) embed 3.15t (#158, #328), and so do the wasmJs ones since #175. The
+ * free-threaded attribute is still decided per published variant (true on every one that carries a
+ * CPython), and the jar and the AAR each get their own resource. Shared metadata variants carry no CPython and
  * get no free-threaded attribute. The `pythonMultiplatform` extension holds one value, the
- * free-threaded one every non-wasm platform embeds, and the per-variant attributes are the
+ * free-threaded one every platform embeds, and the per-variant attributes are the
  * per-platform truth. (Extension and metadata rules: agent proposal, not confirmed.)
  */
 val embeddedPythonVersion = EmbeddedPythonVersion(configuredPythonVersion, freeThreaded = true)
-// `android` covers the AAR's variants and androidNativeArm64/X64, `ios` iosArm64, iosX64 and
-// iosSimulatorArm64. Anything else that is not metadata (the wasmJs variants) is GIL.
-val freeThreadedVariantPrefixes = listOf("desktop", "macosArm64", "linuxX64", "android", "ios")
+// Every variant that carries a CPython is free-threaded since #175 made wasmJs 3.15t (the last GIL
+// one); metadata variants carry none and get no attribute.
 embeddedPythonVersion.register(project) { configurationName ->
     when {
-        freeThreadedVariantPrefixes.any { configurationName.startsWith(it) } -> true
         configurationName.startsWith("metadata") || "Metadata" in configurationName -> null
-        else -> false
+        else -> true
     }
 }
 
@@ -1255,9 +1257,15 @@ kotlin {
     listOf(
         iosArm64(), iosSimulatorArm64(), iosX64(),
         androidNativeArm64(), androidNativeX64(),
-        macosArm64(), linuxX64()
+        macosArm64(), linuxX64(), mingwX64()
     ).forEach { nativeTarget ->
         nativeTarget.apply {
+            // gradle.properties asks every binary for libbacktrace source info, which the Kotlin/Native
+            // runtime provides on ELF targets only; a mingwX64 link then misses
+            // Kotlin_getSourceInfo_libbacktrace (batch run 44973431716). Windows binaries take none.
+            if (konanTarget == MINGW_X64) {
+                binaries.all { binaryOption("sourceInfoType", "noop") }
+            }
             val targetABI = when(konanTarget) {
                 ANDROID_ARM64 -> "arm64-v8a"
                 ANDROID_X64 -> "x86_64"
@@ -1266,18 +1274,21 @@ kotlin {
                 IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
                 MACOS_ARM64 -> "macos-aarch64"
                 LINUX_X64 -> "linux-x86_64"
+                MINGW_X64 -> "windows-x86_64"
                 else -> throw RuntimeException("Unsupported ABI: $konanTarget")
             }
             val targetExtractDir = when(konanTarget.family) {
                 Family.ANDROID -> "$extractedDir/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}$mobileFlavourSuffix/prefix"
                 Family.IOS -> "$extractedDir/ios/Python.xcframework"
-                Family.OSX, Family.LINUX -> "$extractedDir/$targetABI$desktopFlavourSuffix/python"
+                Family.OSX, Family.LINUX, Family.MINGW -> "$extractedDir/$targetABI$desktopFlavourSuffix/python"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
             val targetIncludePath = when(konanTarget.family) {
                 Family.ANDROID -> "$targetExtractDir/include/python$mobileTag"
                 Family.IOS -> "$targetExtractDir/$targetABI/Python.framework/Headers"
                 Family.OSX, Family.LINUX -> "$targetExtractDir/include/python$libVersion$desktopAbiSuffix"
+                // The Windows prefix keeps its headers in `include/` with no version directory.
+                Family.MINGW -> "$targetExtractDir/include"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
 
@@ -1287,6 +1298,16 @@ kotlin {
                 includeDirs(targetIncludePath)
                 if (konanTarget.family == Family.IOS) {
                     compilerOpts("-framework", "Python", "-F$targetExtractDir/$targetABI", "-fno-common", "-fvisibility=hidden")
+                }
+                // SPEC P-1a: Windows ships one `pyconfig.h` for the GIL and the free-threaded build and
+                // leaves `Py_GIL_DISABLED` to the compiler command line; without it every object
+                // header would have the GIL build's layout against `python315t.dll`.
+                if (konanTarget.family == Family.MINGW) {
+                    // `-mcrc32`: the MinGW-w64 headers `Python.h` reaches declare an inline wrapper
+                    // over `__builtin_ia32_crc32qi`, and cinterop compiles a stub for every inline
+                    // function it sees; without the target feature that stub is an error. Nothing
+                    // here calls it.
+                    compilerOpts("-DPy_GIL_DISABLED=1", "-mcrc32")
                 }
             }
 
@@ -1361,6 +1382,12 @@ kotlin {
                         "-lpython$libVersion$desktopAbiSuffix",
                         "-Wl,-rpath,$targetExtractDir/lib"
                     ))
+                } else if (konanTarget.family == Family.MINGW) {
+                    // SPEC P-1a: the MSVC import library, which lld links in MinGW mode; the DLL is
+                    // found at run time beside the executable or on PATH (mingwX64Test sets PATH).
+                    getTest(NativeBuildType.DEBUG).linkerOpts.add(
+                        "$targetExtractDir/libs/python${libVersion.replace(".", "")}$desktopAbiSuffix.lib"
+                    )
                 } else if (konanTarget.family == Family.LINUX) {
                     // python-build-standalone ships libpythonX.Y.so as a symlink to libpythonX.Y.so.1.0,
                     // which Gradle's tarTree extracts as a 0-byte file; stageDesktopLibraries resolves
@@ -1403,7 +1430,16 @@ kotlin {
             // native-image classpath at META-INF/native-image/...
             resources.srcDir(generateDesktopReachabilityMetadata.flatMap { it.outputDirectory })
         }
-        val desktopTest by getting
+        val desktopTest by getting {
+            dependencies {
+                // SPEC U-5c's end-to-end test (`FlowCollectUpcallTest`) collects a real
+                // `kotlinx.coroutines.flow.Flow` from Python. Test scope only: the library has no
+                // coroutines dependency and must not grow one (docs/design/upcall.md section 5.4,
+                // `PendingCall`'s KDoc); the `suspend fun` being exposed is the user's, and its
+                // dispatcher is already on the user's classpath.
+                implementation(libs.kotlinx.coroutines.core)
+            }
+        }
         desktopTest.dependsOn(jvmTest)
         val androidMain by getting
         jvmMain.dependsOn(commonMain)
@@ -1477,9 +1513,12 @@ kotlin {
         }
         val macosArm64Main by getting
         val linuxX64Main by getting
+        val mingwX64Main by getting
         desktopNativeMain.dependsOn(nativeMain)
         macosArm64Main.dependsOn(desktopNativeMain)
         linuxX64Main.dependsOn(desktopNativeMain)
+        // SPEC P-1a (#191): Windows Kotlin/Native desktop.
+        mingwX64Main.dependsOn(desktopNativeMain)
 
         // `src/nativeTest` existed as a directory long before this line, and nothing pointed at
         // it -- so its `GCLeakTest.native.kt` was dead source, and the same file had been copied
@@ -1498,7 +1537,7 @@ kotlin {
             kotlin.srcDir("src/desktopNativeTest/kotlin")
         }
         desktopNativeTest.dependsOn(nativeTest)
-        listOf("macosArm64Test", "linuxX64Test")
+        listOf("macosArm64Test", "linuxX64Test", "mingwX64Test")
             .forEach { getByName(it).dependsOn(desktopNativeTest) }
 
         // ...and `artTest` completes the mirror for the other half: things true of androidNative
@@ -1518,6 +1557,15 @@ tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTes
     dependsOn("downloadPython_macos_aarch64")
     val pythonHome = file("$extractedDir/macos-aarch64$desktopFlavourSuffix/python").absolutePath
     environment("PYTHONHOME", pythonHome)
+}
+
+// SPEC P-1a: the prefix is PYTHONHOME, and its root (python315t.dll, the MSVC runtime) goes on PATH,
+// which is where Windows looks for a DLL the test executable imports.
+tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("mingwX64Test") {
+    dependsOn("downloadPython_windows_x86_64")
+    val pythonHome = file("$extractedDir/windows-x86_64$desktopFlavourSuffix/python").absolutePath
+    environment("PYTHONHOME", pythonHome)
+    environment("PATH", pythonHome + File.pathSeparator + (System.getenv("PATH") ?: ""))
 }
 
 tasks.named<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeHostTest>("linuxX64Test") {
@@ -2001,7 +2049,8 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 // top-level `await`, so Emscripten is fully instantiated before the import object is built.
 //
 // The CPython build itself is produced by `python-multiplatform/scripts/wasm/build-cpython.sh` (also reachable as the
-// `buildWasmPython` task below) -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783),
+// `buildWasmPython` task below) -- free-threaded CPython 3.15.0 (3.15t) with pthreads, on Emscripten
+// 5.0.3, matched to `pyemscripten_2026_0` (PEP 783),
 // relinked with `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the
 // 8287 wasm exports are present in the binary but unreachable from JS, so there is nothing to hand
 // `@WasmImport`; neither appears in PEP 783's ABI-sensitive list. Unlike every other platform's
@@ -2020,12 +2069,12 @@ val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
 /**
  * Builds the CPython Emscripten runtime into `.caches/` and stages it at the default
  * [wasmPythonDir]. Long (a full CPython cross build) and needs network the first time (emsdk 5.0.3
- * and the CPython 3.14.2 checkout), so nothing depends on it: the wasm tasks keep their
+ * and the CPython 3.15.0 checkout), so nothing depends on it: the wasm tasks keep their
  * skip-with-a-message contract when it has not been run.
  */
 val buildWasmPython by tasks.registering(Exec::class) {
     group = "python"
-    description = "Builds CPython 3.14.2 for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
+    description = "Builds free-threaded CPython 3.15t with pthreads for wasm32-emscripten (pyemscripten_2026_0) into .caches/"
     val script = rootProject.layout.projectDirectory.file("python-multiplatform/scripts/wasm/build-cpython.sh").asFile
     commandLine("bash", script.absolutePath, "all")
 }
@@ -2063,7 +2112,7 @@ fun testWheelConfig(sitePackages: File?, wheelsDir: File, required: Boolean): St
 /**
  * The generated `cpython-config.mjs` that `cpython.mjs` imports.
  *
- * Both constants are generated unconditionally: a named export that is missing fails the *whole* ES
+ * Every constant is generated unconditionally: a named export that is missing fails the *whole* ES
  * import, not the branch that reads it, so the module's import list has to be the same in both
  * bundles.
  *
@@ -2082,7 +2131,22 @@ fun cpythonConfigModule(pythonDir: File, stdlibZipUrl: String?): String =
         "\n" +
         "// STDLIB_ZIP_URL is read by both hosts: neither MEMFS nor a browser has a stdlib until this\n" +
         "// zip is installed as `/lib/python3<minor>.zip` during preRun.\n" +
-        "export const STDLIB_ZIP_URL = ${groovy.json.JsonOutput.toJson(stdlibZipUrl)};\n"
+        "export const STDLIB_ZIP_URL = ${groovy.json.JsonOutput.toJson(stdlibZipUrl)};\n" +
+        "\n" +
+        "// SHARED_MEMORY: whether python.wasm's memory is shared (the free-threaded pthreads build),\n" +
+        "// read from its memory import at staging. cpython.mjs refuses to start in a browser page that\n" +
+        "// is not cross-origin isolated when it is true (SPEC T-8).\n" +
+        "export const SHARED_MEMORY = ${runtimeHasSharedMemory(pythonDir)};\n"
+
+/**
+ * SPEC T-8: whether the runtime in [pythonDir] has a shared memory, from its `python.wasm`'s memory
+ * import. A missing or unreadable `python.wasm` counts as not shared; staging fails on it elsewhere.
+ */
+fun runtimeHasSharedMemory(pythonDir: File): Boolean {
+    val module = pythonDir.resolve("python.wasm")
+    return module.isFile &&
+        python.multiplatform.gradle.WasmSharedMemoryImport.hasSharedMemory(module.readBytes()) == true
+}
 
 // =================================================================================================
 // ROADMAP §10 -- why a *missing* interpreter can be made a build failure on demand.
@@ -2201,7 +2265,7 @@ val stageWasmBrowserRuntime by tasks.registering {
         // second place to keep in step, and `cpython.mjs` already reads the version out of the
         // running interpreter to decide where in MEMFS it goes.
         val stdlibZip = pythonDir.listFiles()
-            ?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+\.zip""")) }
+            ?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+t?\.zip""")) }
             ?: throw GradleException(
                 "no python<major>.<minor>.zip in $pythonDir. A browser has no NODEFS, so the " +
                     "standard library has to travel as the zip CPython's own web example fetches; " +
@@ -2259,7 +2323,12 @@ val wasmBrowserRuntimeZip by tasks.registering(Zip::class) {
  * @param dir the compile-sync output webpack reads, `build/wasm/packages/<name>/kotlin`.
  * @param modulePrefix the generated module basename, which is `<root project>-<project>`.
  */
-fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org.gradle.api.logging.Logger) {
+fun patchKotlinWasmOutputForCPython(dir: File, modulePrefix: String, logger: org.gradle.api.logging.Logger, runtimeDir: File) {
+    // SPEC T-7 (#175): check the linked module's memory import, and make it shared when the CPython
+    // runtime's memory is (the 3.15t pthreads build). The plugin's tested code, on this build's classpath
+    // through `id("org.thisisthepy.python.multiplatform.bindings") apply false`.
+    python.multiplatform.gradle.patchKotlinWasmMemoryImport(dir, modulePrefix, runtimeDir, logger)
+
     val importObject = dir.listFiles()?.firstOrNull { it.name.endsWith(".import-object.mjs") }
         ?: throw GradleException("No *.import-object.mjs in $dir -- the Kotlin/Wasm output layout changed.")
     val text = importObject.readText()
@@ -2608,7 +2677,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
         // silently made every wasm test depend on a CPython **source checkout** sitting next to the
         // build directory; staging it here is what lets `wasmPythonDir` be an unpacked
         // `python-multiplatform-wasm-runtime` artefact, which is the only form CI can obtain.
-        val stdlibZip = pythonDir.listFiles()?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+\.zip""")) }
+        val stdlibZip = pythonDir.listFiles()?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+t?\.zip""")) }
         copy {
             from(pythonDir) { include("python.mjs", "python.wasm") }
             if (stdlibZip != null) from(stdlibZip)
@@ -2644,7 +2713,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
 
         // The same two substitutions a consumer's browser bundle needs, and the reason they are a
         // shared function: see `patchKotlinWasmOutputForCPython`.
-        patchKotlinWasmOutputForCPython(dir, modulePrefix = rootProject.name, logger = logger)
+        patchKotlinWasmOutputForCPython(dir, modulePrefix = rootProject.name, logger = logger, runtimeDir = pythonDir)
     }
 }
 
@@ -2743,9 +2812,43 @@ fun resolveChromiumFamilyBrowser(): String? {
     return candidates.firstOrNull { File(it).canExecute() }
 }
 
+// Issue #546: every file `copyAndroidPythonAssets` stages must reach the AAR. AGP's default
+// `ignoreAssetsPattern` (`<dir>_*` in particular) silently dropped every stdlib directory whose name
+// starts with `_` (`zipfile/_path`, `_pyrepl`, `compression/_common`, ...), and `importlib.metadata`
+// then failed on the device with "No module named 'zipfile._path'" (torchnative, 2026-11-27).
+// This compares the staged tree with the AAR's entries, so a filter that drops anything fails here.
+val verifyAarStdlib by tasks.registering {
+    group = "verification"
+    description = "Fails when the release AAR lacks a file staged under build/android/assets (#546)."
+    dependsOn("bundleReleaseAar")
+    val stagedRoot = file("$androidBuildDir/assets")
+    val aar = layout.buildDirectory.file("outputs/aar/${project.name}-release.aar")
+    doLast {
+        val staged = stagedRoot.walkTopDown().filter { it.isFile }
+            .map { "assets/" + it.relativeTo(stagedRoot).invariantSeparatorsPath }.toSet()
+        check(staged.isNotEmpty()) { "nothing is staged under $stagedRoot" }
+        val entries = ZipFile(aar.get().asFile).use { zip ->
+            zip.entries().asSequence().map { it.name }.toSet()
+        }
+        val missing = (staged - entries).sorted()
+        check(missing.isEmpty()) {
+            "the AAR lacks ${missing.size} of ${staged.size} staged asset files (#546), for example:\n" +
+                missing.take(20).joinToString("\n")
+        }
+        logger.lifecycle("verifyAarStdlib: all ${staged.size} staged asset files are in the AAR")
+    }
+}
+
 android {
     namespace = "python.multiplatform"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+
+    // AGP's default ignoreAssetsPattern minus `<dir>_*`, which dropped every stdlib directory whose
+    // name starts with `_` (`zipfile/_path`, `_pyrepl`, ...) from the AAR (#546; checked by
+    // verifyAarStdlib). An app merging this AAR applies its own pattern too (toolchain #166).
+    androidResources {
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }
 
     sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$androidBuildDir/assets")
     // KMP androidMain resources do not reach the AAR's classes.jar; AGP's main resources do.
@@ -2853,4 +2956,5 @@ tasks.named<Test>("desktopTest") {
     
     val pythonHome = File(extractedDir, "$platform$desktopFlavourSuffix/python").absolutePath
     environment("PYTHONHOME", pythonHome)
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
 }

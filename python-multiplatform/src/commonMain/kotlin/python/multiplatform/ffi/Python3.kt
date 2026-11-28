@@ -510,7 +510,7 @@ def __pmp_run_module__(mod_name, argv):
      *   nothing, and the second one is exactly the defect this function used to have. Naming the
      *   option in the refusal is deliberate: a caller who typed `-I` expecting isolation and got a
      *   generic "unsupported" would not necessarily notice their isolation request was dropped.
-     * - **empty `args`**, refused the same way, since CPython's own default with nothing on the
+     * - **nothing after the program name**, refused the same way, since CPython's own default with nothing on the
      *   command line is also to read from stdin (interactively, if it is a tty).
      *
      * Anything after the mode-selecting token (the command, the module name, or the script path)
@@ -528,18 +528,39 @@ def __pmp_run_module__(mod_name, argv):
      * `sys.argv` is set for the duration of the call and restored afterwards, on both the
      * returning and the raising path.
      *
-     * @param args the command-line arguments *after* the program name, e.g. `["-c", "print(1)"]`
-     *   or `["script.py", "--flag"]`, the same slice `Py_BytesMain(argc, argv)` would see as
-     *   `argv[1:]`.
+     * ### Signature
+     *
+     * `runApp(argc, argv)`, the shape of the owner's sketch (`python_for_kotlin_binding.mermaid`:
+     * `+runApp(argc int, argv Array<String>) Int`) and of the pre-agent code, whose body was the
+     * commented-out `Py_BytesMain(argv)` under the KDoc "Run Python script as an application
+     * (Automatically initializes Python)" (issue #524 item 7; owner, 2026-11-22: "에이전트 도입 이전
+     * 준석이가 마지막으로 작업한 커밋 코드 기준으로 함부러 바꾼 코드 모양새들은 바로 잡도록 해").
+     * [argv] is a C `main`'s vector: `argv[0]` is the program name and is not parsed, and only the
+     * first [argc] elements are read. The interpreter is started first when it is not running.
+     *
+     * @param argc how many elements of [argv] to read, the program name included.
+     * @param argv the program name followed by the command line, e.g.
+     *   `["python", "-c", "print(1)"]` or `["python", "script.py", "--flag"]`: what
+     *   `Py_BytesMain(argc, argv)` takes.
      * @return the exit status: 0 for a clean run, otherwise whatever the program passed to
      *   `sys.exit()`.
-     * @throws IllegalArgumentException if `-c` or `-m` is given with no following argument.
-     * @throws UnsupportedOperationException for `-`, empty `args`, `--` with nothing after it, or
+     * @throws IllegalArgumentException if [argc] is negative or larger than [argv], or if `-c` or
+     *   `-m` is given with no following argument.
+     * @throws UnsupportedOperationException for `-`, nothing after the program name, `--` with nothing after it, or
      *   any other option that only has meaning before `Py_Initialize()`.
      * @throws PyException if the program raises anything other than `SystemExit`, or if a `-m`
      *   module cannot be found.
      */
-    fun runApp(args: List<String>): Int {
+    fun runApp(argc: Int, argv: Array<String>): Int {
+        require(argc in 0..argv.size) { "Python3.runApp: argc is $argc but argv has ${argv.size} element(s)" }
+        // The baseline's contract: "Run Python script as an application (Automatically initializes Python)".
+        if (!isInitialized) initialize()
+        // argv[0] is the program name, as in C `main`; what follows it is the command line.
+        return runCommandLine(argv.asList().subList(0, argc).drop(1))
+    }
+
+    /** [runApp]'s command line: the arguments after the program name. */
+    private fun runCommandLine(args: List<String>): Int {
         if (args.isEmpty()) {
             throw UnsupportedOperationException(
                 "Python3.runApp got no arguments: CPython's own default with nothing on the " +
@@ -860,8 +881,9 @@ def __pmp_run_file__(path, argv):
      * released since the previous one, so a workload that never drops a wrapper never pays.
      *
      * Which build that is depends on the platform ([python.multiplatform.embedsFreeThreadedPython]):
-     * desktop, Android, androidNative and iOS embed 3.15t (issues #158, #328), so this defaults to
-     * on there; wasm embeds a GIL build until #175, so it defaults to off there.
+     * desktop, Android, androidNative, iOS and wasm embed 3.15t (issues #158, #328, #175), so this
+     * defaults to on everywhere the library ships today; the GIL branch below is kept for the
+     * `expect`'s other value.
      *
      * Defaults to on for free-threaded builds, where deferred release is the defect described on
      * [drainPendingReleases], a build with the global lock frees a *plain* reference the

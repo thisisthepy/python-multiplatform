@@ -37,6 +37,8 @@ androidx-activity-compose = { module = "androidx.activity:activity-compose", ver
 androidx-lifecycle-viewmodel = { group = "org.thisisthepy.compose.androidx.lifecycle", name = "lifecycle-viewmodel", version.ref = "compose-libraries" }
 androidx-lifecycle-runtime-compose = { group = "org.thisisthepy.compose.androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "compose-libraries" }
 kotlinx-coroutines-swing = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
+# Test-only in python-multiplatform (desktopTest): the library itself has no coroutines dependency (docs/design/upcall.md 5.4).
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-browser = { group = "org.jetbrains.kotlinx", name = "kotlinx-browser", version.ref = "kotlinx-browser" }
 # The fork's design systems (compose-multiplatform-core-extended `extended/design-systems`, issue #408).
 designsystem = { group = "org.thisisthepy.compose.designsystem", name = "designsystem", version.ref = "compose-libraries" }
@@ -47,6 +49,9 @@ designsystem-deepin = { group = "org.thisisthepy.compose.designsystem", name = "
 designsystem-fluent = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-fluent", version.ref = "compose-libraries" }
 designsystem-gnome = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-gnome", version.ref = "compose-libraries" }
 designsystem-liquid-glass = { group = "org.thisisthepy.compose.designsystem", name = "designsystem-liquid-glass", version.ref = "compose-libraries" }
+# The fork's Kotlin/Native macOS window (compose-multiplatform-core-extended `extended/window`, AppKit and
+# Metal), for the K/N notebook app in a real window (#191, SPEC B-10a).
+compose-window-native-macos = { group = "org.thisisthepy.compose.window", name = "native-macos", version.ref = "compose-libraries" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

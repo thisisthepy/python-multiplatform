@@ -2,15 +2,20 @@ package python.multiplatform.ffi.upcall
 
 import python.multiplatform.ffi.PyLong_Check
 import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.exceptions.isNoneObject
 import python.multiplatform.ffi.getThreadGILState
 import python.multiplatform.ffi.types.basic.PyNone
+import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.reflection.CallableHandle
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.ObjectReference
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 import python.native.ffi.NativePointer
 import python.native.ffi.PyBool_FromLong
@@ -124,6 +129,11 @@ object UpcallTrampoline {
      */
     fun invoke(callableHandle: Long, argsTuple: Long): Long = attached {
         try {
+            // SPEC U-2 (#164 item 6): a member read on a Kotlin throwable's proxy. A reserved handle
+            // rather than a table row, so it needs no registration and survives a table reinstall.
+            if (callableHandle == KotlinThrowableProxy.OPERATION_HANDLE) {
+                return@attached KotlinThrowableProxy.dispatch(argsTuple)
+            }
             val entry = UpcallTable.callable(CallableHandle(callableHandle))
             val result = entry.callable(unmarshalArguments(entry, argsTuple))
             // A suspending entry's body hands back a PendingCall rather than the value, because
@@ -138,6 +148,50 @@ object UpcallTrampoline {
         }
     }
 
+    init {
+        PendingCall.ambientContextProvider = ::readAmbientCoroutineContext
+    }
+
+    /**
+     * Reads the ambient Kotlin [CoroutineContext] configured via Python's
+     * `python_multiplatform.use_coroutine_context` / `set_coroutine_context` while this thread is
+     * inside an [attached] upcall frame (SPEC U-5b). Direct Kotlin callers outside an upcall or
+     * inside `withoutGIL` get [EmptyCoroutineContext] without touching CPython.
+     */
+    private fun readAmbientCoroutineContext(): CoroutineContext {
+        if (!getThreadGILState().inUpcall) return EmptyCoroutineContext
+        return Python3.import("sys").use { sysMod ->
+            sysMod.getAttr("modules").use { sysModules ->
+                sysModules.getAttr("get").use { getFn ->
+                    PyString.from(KotlinSurface.MODULE_NAME).use { modName ->
+                        getFn.invoke(modName).use { pmMod ->
+                            if (pmMod.pointer.isNoneObject()) return EmptyCoroutineContext
+                            val getCtx = pmMod.getAttrOrNull("get_coroutine_context")
+                                ?: return EmptyCoroutineContext
+                            getCtx.use { fn ->
+                                fn.invoke().use { ctxObj ->
+                                    if (ctxObj.pointer.isNoneObject()) return EmptyCoroutineContext
+                                    val handleObj = ctxObj.getAttrOrNull("_pm_handle")
+                                    val raw = if (handleObj != null) {
+                                        handleObj.use { it.toString().toLongOrNull() }
+                                    } else {
+                                        ctxObj.toString().toLongOrNull()
+                                    } ?: throw IllegalStateException(
+                                        "python_multiplatform coroutine context has no valid handle",
+                                    )
+                                    HandleTable.resolveRaw(raw) as? CoroutineContext
+                                        ?: throw IllegalStateException(
+                                            "stale or invalid Kotlin CoroutineContext handle: $raw",
+                                        )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Attaches this thread for the duration of [block], **without** consulting the nesting depth.
      *
@@ -149,12 +203,15 @@ object UpcallTrampoline {
         val threadState = getThreadGILState()
         val outerState = threadState.state
         val outerDepth = threadState.depth
+        val outerInUpcall = threadState.inUpcall
         val gilState = PyGILState_Ensure()
         threadState.state = gilState
         threadState.depth = 1
+        threadState.inUpcall = true
         try {
             return block()
         } finally {
+            threadState.inUpcall = outerInUpcall
             threadState.depth = outerDepth
             threadState.state = outerState
             PyGILState_Release(gilState)
@@ -230,7 +287,8 @@ object UpcallTrampoline {
         val offset = if (entry.kind.hasReceiver) 1 else 0
         if (offset == 1) args[0] = toKotlinObject(item(tuple!!, 0))
         for (i in entry.paramTypes.indices) {
-            args[offset + i] = toKotlin(entry.paramTypes[i], item(tuple!!, (offset + i).toLong()))
+            val declaredType = entry.paramTypeNames.getOrNull(i)
+            args[offset + i] = toKotlin(entry.paramTypes[i], item(tuple!!, (offset + i).toLong()), declaredType)
         }
         return args
     }
@@ -239,7 +297,7 @@ object UpcallTrampoline {
     private fun item(tuple: NativePointer, index: Long): NativePointer =
         PyTuple_GetItem(tuple, index) ?: failFromPython("argument $index is missing")
 
-    private fun toKotlin(tag: TypeTag, value: NativePointer): Any? {
+    private fun toKotlin(tag: TypeTag, value: NativePointer, declaredTypeName: String? = null): Any? {
         // `None` is how Python spells a null argument, whatever the tag says it should have been.
         if (value.toRawValue() == noneAddress) return null
         return when (tag) {
@@ -249,9 +307,15 @@ object UpcallTrampoline {
             TypeTag.STRING -> PyUnicode_AsUTF8(value) ?: failFromPython("expected a str")
             TypeTag.BYTES -> toByteArray(value)
             TypeTag.UNIT -> null
-            TypeTag.OBJECT -> toKotlinObject(value)
+            TypeTag.OBJECT -> if (declaredTypeName == PY_OBJECT_TYPE_NAME) {
+                PyObject(value, borrowed = true)
+            } else {
+                toKotlinObject(value)
+            }
         }
     }
+
+    private const val PY_OBJECT_TYPE_NAME = "python.multiplatform.ffi.PyObject"
 
     /**
      * The one tag that is two things at once, resolved by what Python actually sent.
@@ -422,6 +486,10 @@ object UpcallTrampoline {
                 Py_IncRef(liveValue.pointer)
                 return liveValue.pointer
             }
+            // Made in Kotlin: raised as its own Python class, its `type` or the built-in class its
+            // Kotlin class mirrors (`PyTypeError` raises `TypeError`; SPEC U-2, agent proposal). A
+            // plain `PyException` with neither falls through to `RuntimeError` below.
+            raisedAsItsOwnClass(t)?.let { return it }
         }
         if (t is CancellationException) {
             val pyCause = t.cause as? PyException
@@ -469,7 +537,9 @@ object UpcallTrampoline {
 
     /**
      * Builds a **new** reference to the `BaseException` placed on `__cause__` for a Kotlin
-     * [Throwable] (SPEC U-2, issue #164).
+     * [Throwable] (SPEC U-2, issue #164): its [KotlinThrowableProxy], with the nested
+     * [Throwable.cause] chain set on `__cause__` up to [MAX_CAUSE_DEPTH] so a Python traceback shows
+     * it without asking Kotlin.
      */
     private fun buildKotlinCausePointer(t: Throwable, depth: Int): NativePointer? {
         if (depth >= MAX_CAUSE_DEPTH) return null
@@ -480,10 +550,12 @@ object UpcallTrampoline {
                 return liveValue.pointer
             }
         }
-        val className = t::class.simpleName ?: "Throwable"
-        val msg = t.message
-        val summary = if (msg.isNullOrEmpty()) className else "$className: $msg"
-        val causePtr = instantiateException(runtimeErrorType, summary) ?: return null
+        // The proxy of [t] itself (owner decision 2026-11-22: the Python exception IS the proxy of the
+        // original Throwable). Where no proxy can exist (the entry points are not published), the
+        // summary it would print stands in, as before.
+        val causePtr = KotlinThrowableProxy.pointerFor(t)
+            ?: instantiateException(runtimeErrorType, KotlinThrowableProxy.summaryOf(t))
+            ?: return null
         val nested = t.cause
         if (nested != null && nested !== t) {
             val nestedPtr = buildKotlinCausePointer(nested, depth + 1)
@@ -492,6 +564,25 @@ object UpcallTrampoline {
             }
         }
         return causePtr
+    }
+
+    /**
+     * A **new** reference to `cls(errMsg)` for a [PyException] with no live value whose class is
+     * known ([PyException.withOwnPythonClass]), with its Kotlin `cause` on `__cause__`; `null` when it
+     * has no such class or the instance cannot be built (the caller then builds a `RuntimeError`).
+     */
+    private fun raisedAsItsOwnClass(t: PyException): NativePointer? {
+        val excPtr = try {
+            t.withOwnPythonClass { cls -> cls?.use { instantiateException(it.pointer, t.errMsg) } }
+        } catch (_: Throwable) {
+            PyErr_Clear()
+            null
+        } ?: return null
+        val kotlinCause = t.cause
+        if (kotlinCause != null && kotlinCause !== t) {
+            buildKotlinCausePointer(kotlinCause, depth = 0)?.let { PyException_SetCause(excPtr, it) }
+        }
+        return excPtr
     }
 
     /** Calls `excType(message)` and returns the new exception reference, clearing any error on failure. */

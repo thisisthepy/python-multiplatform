@@ -34,18 +34,7 @@ import kotlin.test.assertTrue
  */
 class ReturnSupertypeTest {
 
-    private val caches: File? = listOf(
-        File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
-        File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
-    ).firstOrNull { it.isDirectory }
-
-    private fun jarUnder(group: String, artifact: String): File? = listOf(
-        group,
-        group.replaceFirst("org.jetbrains.compose", "org.thisisthepy.compose"),
-    ).firstNotNullOfOrNull { g ->
-        caches?.resolve(g)?.resolve(artifact)
-            ?.walkTopDown()?.firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
-    }
+    private fun jarUnder(group: String, artifact: String): File? = ExternalArtifacts.jarUnder(group, artifact)
 
     private val kotlinStdlibJar: File
         get() = File(Class.forName("kotlin.text.Regex").protectionDomain.codeSource.location.toURI())
@@ -66,6 +55,18 @@ class ReturnSupertypeTest {
         kotlinStdlibJar,
     )
 
+    /** Every supertype of [type] the JDK declares, transitively, without `java.lang.Object`. */
+    private fun jdkSupertypesOf(type: Class<*>): Set<String> {
+        val seen = linkedSetOf<String>()
+        val queue = ArrayDeque<Class<*>>(listOfNotNull(type.superclass) + type.interfaces)
+        while (queue.isNotEmpty()) {
+            val next = queue.removeFirst()
+            if (next == Any::class.java || !seen.add(next.name)) continue
+            queue.addAll(listOfNotNull(next.superclass) + next.interfaces)
+        }
+        return seen
+    }
+
     /**
      * The row the fixture's render test turns on: `BitmapPainter` **is a** `Painter`, taken out of
      * the jar rather than written down here.
@@ -77,7 +78,7 @@ class ReturnSupertypeTest {
      */
     @Test
     fun aBoundDeclarationCarriesWhatItsReturnTypeIsA() {
-        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: return
+        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: ExternalArtifacts.skip("ui-graphics-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             graphics,
             includePrefixes = listOf("androidx.compose.ui.graphics"),
@@ -104,7 +105,7 @@ class ReturnSupertypeTest {
      */
     @Test
     fun theDeclarationModelCarriesTheSameAncestryAsTheBinding() {
-        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: return
+        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: ExternalArtifacts.skip("ui-graphics-desktop jar not in the Gradle cache")
         val declarations = ArtifactScanner.scanDeclarations(
             graphics,
             includePrefixes = listOf("androidx.compose.ui.graphics"),
@@ -121,7 +122,7 @@ class ReturnSupertypeTest {
      */
     @Test
     fun aReturnThatIsNotAHandleCarriesNoAncestry() {
-        val unit = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: return
+        val unit = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: ExternalArtifacts.skip("ui-unit-desktop jar not in the Gradle cache")
         val entries = ArtifactScanner.scanJar(
             unit,
             includePrefixes = listOf("androidx.compose.ui.unit"),
@@ -144,6 +145,11 @@ class ReturnSupertypeTest {
      * Printed rather than pinned to a literal -- they are facts about a Compose version -- with
      * bounds loose enough to survive one and tight enough to catch the shape going wrong: a chain
      * that ran away, or an ancestry attached to everything.
+     *
+     * The length bound is for the walked libraries' own types. A JDK type's chain is the running
+     * JDK's hierarchy and grows with it (`java.util.ArrayList` gained `SequencedCollection` in JDK 21,
+     * nine supertypes; batch run 45003070139), so it is compared with that hierarchy, read from the
+     * class itself, instead of with a number.
      */
     @Test
     fun theAncestryTheTableCarriesIsMeasuredRatherThanAssumed() {
@@ -152,7 +158,7 @@ class ReturnSupertypeTest {
             jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
             jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop"),
         )
-        if (jars.size < 3) return
+        if (jars.size < 3) ExternalArtifacts.skip("material3, foundation-layout or ui-graphics jar not in the Gradle cache")
         val classpath = composeClasspath()
         val entries = jars.flatMap { jar ->
             ArtifactScanner.scanJar(
@@ -173,11 +179,14 @@ class ReturnSupertypeTest {
             entry.returnSupertypes.sumOf { it.length + SUPERTYPE_SEPARATOR.length }
         }
         val rendered = renderArtifactFragmentSource(ArtifactFragment("Measured", "artifact:measured", entries)).length
-        val longest = carrying.maxOfOrNull { it.returnSupertypes.size } ?: 0
+        val (jdkReturns, ownReturns) = carrying.partition { it.returnTypeName.orEmpty().startsWith("java.") }
+        val longestEntry = ownReturns.maxByOrNull { it.returnSupertypes.size }
+        val longest = longestEntry?.returnSupertypes?.size ?: 0
+        val longestChain = longestEntry?.let { "${it.name}: ${it.returnTypeName} <: ${it.returnSupertypes.joinToString(" <: ")}" }
         println(
             "return ancestry: ${carrying.size} of ${entries.size} entries carry one, " +
                 "+$addedChars characters against $rendered rendered " +
-                "(${"%.3f".format(100.0 * addedChars / rendered)}%), longest chain $longest",
+                "(${"%.3f".format(100.0 * addedChars / rendered)}%), longest chain $longest ($longestChain)",
         )
 
         assertTrue(carrying.isNotEmpty(), "nothing carries an ancestry, so this measures nothing")
@@ -185,7 +194,14 @@ class ReturnSupertypeTest {
             carrying.size * 4 < entries.size,
             "${carrying.size} of ${entries.size} entries carry an ancestry -- it is being asked too widely",
         )
-        assertTrue(longest in 1..8, "longest chain $longest")
+        assertTrue(longest in 1..8, "longest chain $longest: $longestChain")
+        for (entry in jdkReturns) {
+            assertEquals(
+                jdkSupertypesOf(Class.forName(entry.returnTypeName)),
+                entry.returnSupertypes.toSet(),
+                "${entry.name} returns ${entry.returnTypeName}; its ancestry should be the running JDK's",
+            )
+        }
         assertTrue(addedChars * 100 < rendered, "the ancestry added $addedChars characters to $rendered")
     }
 
@@ -209,7 +225,7 @@ class ReturnSupertypeTest {
         assertEquals(null, renderedReturnTypeName(plain.copy(returnTypeName = null)))
         // No Kotlin fully-qualified name can contain either character, so the grammar cannot be
         // ambiguous -- checked against every name this walk produced rather than argued.
-        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: return
+        val graphics = jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop") ?: ExternalArtifacts.skip("ui-graphics-desktop jar not in the Gradle cache")
         val names = ArtifactScanner.scanJar(
             graphics,
             includePrefixes = listOf("androidx.compose.ui.graphics"),

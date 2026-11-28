@@ -15,6 +15,7 @@ import python.multiplatform.ffi.ProxyTypeFactory
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.withGIL
+import python.multiplatform.embedsFreeThreadedPython
 import python.multiplatform.reflection.ClassLookup
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.ReflectedClass
@@ -65,7 +66,22 @@ class WasmCycleCollectionTest {
         HandleTable.releaseAll()
     }
 
-    private fun refCount(objPtr: Int): Int = Pointer(objPtr.toUInt()).loadInt()
+    /**
+     * `Py_REFCNT` at [objPtr], for whichever object header this build has. Offset 0 is `ob_refcnt`
+     * only on a build with the global lock. The free-threaded header (`Include/object.h`) starts
+     * with `ob_tid`; on wasm32 the count is split between `uint32 ob_ref_local` at +8 and
+     * `Py_ssize_t ob_ref_shared` at +12, shifted left by `_Py_REF_SHARED_SHIFT` (2). This is the
+     * wasm32 port of `desktopTest/CycleCollectionTest.typeRefCount`, whose offsets (+12, +16) are
+     * the 64-bit ones.
+     */
+    private fun refCount(objPtr: Int): Int =
+        if (!embedsFreeThreadedPython) {
+            Pointer(objPtr.toUInt()).loadInt()
+        } else {
+            val local = Pointer((objPtr + 8).toUInt()).loadInt()
+            val shared = Pointer((objPtr + 12).toUInt()).loadInt()
+            local + (shared shr 2)
+        }
 
     @Test
     fun theProxyTypeIsBuiltAndItsSlotsAreRealFunctionPointers() {
@@ -134,6 +150,10 @@ class WasmCycleCollectionTest {
             assertTrue(ProxyTypeFactory.createProxyType() != 0L)
             val typePtr = ProxyType.proxyTypePtr
 
+            // Free-threaded only: a heap type carries `_PyGC_BITS_DEFERRED`, so `_Py_INCREF_TYPE` in
+            // `PyType_GenericAlloc` is deferred and the count does not move until a collection
+            // materialises it (desktopTest/CycleCollectionTest's KDoc has the measurements).
+            if (embedsFreeThreadedPython) python.native.ffi.bindings.PyGC_Collect()
             val liveBefore = HandleTable.liveCount
             val typeRefBefore = refCount(typePtr)
 
@@ -155,6 +175,7 @@ class WasmCycleCollectionTest {
                 liveBefore + rounds, HandleTable.liveCount,
                 "setup failed: $rounds handles should be rooted while the proxies are alive"
             )
+            if (embedsFreeThreadedPython) python.native.ffi.bindings.PyGC_Collect()
             val typeRefAlive = refCount(typePtr)
             assertEquals(
                 typeRefBefore + rounds, typeRefAlive,

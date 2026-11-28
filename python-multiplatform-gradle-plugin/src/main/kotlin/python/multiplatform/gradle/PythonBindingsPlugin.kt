@@ -6,6 +6,7 @@ import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import python.multiplatform.gradle.artifact.PythonArtifactBindingsTask
+import python.multiplatform.gradle.artifact.kotlinNativeStdlibFiles
 import python.multiplatform.gradle.stubs.PythonStubsTask
 
 /**
@@ -335,7 +336,11 @@ class PythonBindingsPlugin : Plugin<Project> {
         // After evaluation, because the targets and their framework binaries are declared in the
         // consumer's own `kotlin { }` block. A module without iOS targets gets no task.
         project.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
-            project.afterEvaluate { configureIosConsumer(this, extension) }
+            project.afterEvaluate {
+                configureIosConsumer(this, extension)
+                // SPEC L-9c (#191): macosArm64 / linuxX64 executables link and ship libpython.
+                configureDesktopNativeConsumer(this, extension)
+            }
         }
         configureWasmBrowserRuntimeStaging(project, extension)
 
@@ -446,6 +451,8 @@ class PythonBindingsPlugin : Plugin<Project> {
         }
 
         val klibReader = klibReaderClasspath(project)
+        // The Kotlin/Native stdlib, for types only (#191, SPEC B-2).
+        val klibTypes = kotlinNativeStdlibFiles(project)
         applyDefaultCallCompilerPlugin(project, extension)
 
         for ((configurationName, sourceSetName) in targets) {
@@ -477,6 +484,7 @@ class PythonBindingsPlugin : Plugin<Project> {
                 includePrefixes.set(includes)
                 excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
                 this.klibReaderClasspath.from(klibReader)
+                klibTypeClasspath.from(klibTypes)
                 outputDirectory.set(
                     project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
                 )
@@ -487,7 +495,7 @@ class PythonBindingsPlugin : Plugin<Project> {
 
             addKotlinSourceDirectory(project, sourceSetName, task)
             addThunkClasspath(project, sourceSetName, task)
-            configureStubGeneration(project, extension, resolved, includes, sourceSetName, klibReader, isLegacyName, taskSuffix)
+            configureStubGeneration(project, extension, resolved, includes, sourceSetName, klibReader, klibTypes, isLegacyName, taskSuffix)
         }
     }
 
@@ -612,6 +620,7 @@ class PythonBindingsPlugin : Plugin<Project> {
         includes: List<String>,
         sourceSetName: String,
         klibReader: org.gradle.api.artifacts.Configuration,
+        klibTypes: org.gradle.api.provider.Provider<List<java.io.File>>,
         isLegacyName: Boolean,
         taskSuffix: String,
     ) {
@@ -624,6 +633,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             includePrefixes.set(includes)
             excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
             klibReaderClasspath.from(klibReader)
+            klibTypeClasspath.from(klibTypes)
             outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
         }
         project.tasks.matching { it.name == "prepareKotlinIdeaImport" }.configureEach { dependsOn(task) }
@@ -876,7 +886,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             val syncedDir = project.rootProject.layout.buildDirectory.dir("wasm/packages/$modulePrefix/kotlin")
             val log = project.logger
             doFirst {
-                patchWasmOutputForCPython(syncedDir.get().asFile, modulePrefix, log)
+                patchWasmOutputForCPython(syncedDir.get().asFile, modulePrefix, log, runtimeDir = destination.get().asFile)
             }
         }
     }

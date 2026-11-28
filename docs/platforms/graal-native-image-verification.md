@@ -225,3 +225,29 @@ rather than been produced silently.
 
 Nothing is outstanding on the desktop target. The untested surface is other targets: this verifies
 **desktop only**, as `sample/build.gradle.kts` wires `nativeCompile` from the `desktop` compilation.
+
+---
+
+## TypedPython AOT library downcall verification (#456)
+
+The CPython-free TypedPython AOT library wrappers (`GenerateAotLibraryBindingsTask`, SPEC N-17) are verified in a
+separate native image under `:python-multiplatform-ksp:fixtures:aot` without running the tracing agent.
+
+- **Generated metadata:** when `resourceOutputDirectory` is configured on `GenerateAotLibraryBindingsTask`, the task
+  writes `META-INF/native-image/<packageName>/<prefix>/reachability-metadata.json` containing every foreign downcall
+  descriptor bound by `Handles` and the `java.lang.foreign` reflection surface used once at link time by
+  `AotFfmRuntime` (whose `Class.forName` calls in `AotFfm.kt` use string literals).
+- **Foreign API support:** in Liberica NIK 25 (`native-image --expert-options-all`), `-H:+ForeignAPISupport` is
+  enabled by default (`Default: + (enabled)`), so `--no-fallback` and `--enable-native-access=ALL-UNNAMED` are the
+  only flags `aotNativeCompile` passes alongside the generated metadata on the classpath.
+- **Tasks:**
+  - `:python-multiplatform-ksp:fixtures:aot:aotNativeJvm`: runs `AotNativeImageMainKt` on JDK 25 (BellSoft Liberica)
+    as the JVM control.
+  - `:python-multiplatform-ksp:fixtures:aot:aotNativeCompile`: builds `build/native/aot-fixture/aot-fixture` with
+    `native-image --no-fallback --enable-native-access=ALL-UNNAMED` and copies the built shared libraries and
+    `<prefix>.json` files into `libs/<prefix>/` beside the binary.
+  - `:python-multiplatform-ksp:fixtures:aot:aotNativeRun`: executes `aot-fixture` with `JAVA_HOME` and `PYTHONHOME`
+    unset, checks `AOT_NATIVE_IMAGE: 31 passed, 0 failed of 31`, and on macOS checks `otool -L` for neither `libjvm`
+    nor `libpython`.
+- **CI:** `.github/workflows/typedpython.yml` (`app-fixture` on `macos-latest`) runs `aotNativeRun` after
+  `desktopTest` using `graalvm/setup-graalvm@v1` (`liberica`, Java 25).

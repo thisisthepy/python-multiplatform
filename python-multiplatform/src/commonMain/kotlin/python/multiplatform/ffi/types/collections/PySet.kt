@@ -4,6 +4,8 @@ import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.conversion.PyProxy
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.types.iteration.PyIterator
+import python.multiplatform.ffi.types.iteration.SnapshotIterator
 import python.native.ffi.NativePointer
 import python.native.ffi.PyNumber_And
 import python.native.ffi.PyNumber_Or
@@ -21,9 +23,9 @@ import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
 
 /**
- * Wrapper around a Python `set` object, adopting `MutableSet<PyObject>` per
- * the mermaid sketch (`MutableSet <|.. PySet`). See [PyList] for why this
- * does not also implement `PyIterable`.
+ * Wrapper around a Python `set` object: a [PyMutableIterable] and a Kotlin `MutableSet` (issue #524
+ * items 3 and 4; the owner's mermaid: `PyMutableIterable <|-- PySet`, `MutableSet <|.. PySet`).
+ * Elements are `Any?` on the way in and [PyObject]s on the way out.
  *
  * Backed by `PySet_New`/`PySet_Add`/`PySet_Discard`/`PySet_Contains`/
  * `PySet_Pop`/`PySet_Clear`/`PySet_Size` (the last backs [size] directly),
@@ -33,7 +35,7 @@ import python.native.ffi.Py_IncRef
  * [snapshotElements]) for iteration, since sets have no indexed access.
  */
 open class PySet(pointer: NativePointer, borrowed: Boolean) :
-    PyObject(pointer, borrowed), PyProxy<Set<Any?>>, MutableSet<PyObject> {
+    PyMutableIterable(pointer, borrowed), PyProxy<Set<Any?>>, MutableSet<Any?> {
 
     companion object {
         /** The `PyType` for `set` (`builtins.set`). */
@@ -46,8 +48,11 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
             deriveTypeAndRelease(emptySet)
         }
 
-        /** Builds a new Python `set` containing (references to) [elements]. */
-        fun fromSet(elements: Set<PyObject>): PySet {
+        /**
+         * Builds a new Python `set` of [elements] (the mermaid's `+fromSet(set Set)`); a [PyObject] element is
+         * stored as itself, any other value is converted as [PyMutableIterable] describes.
+         */
+        fun fromSet(elements: Set<*>): PySet {
             // PySet_New's `iterable` parameter is non-nullable here even though the empty-set
             // case is allowed at the C level -- build a scratch tuple to feed it either way.
             val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
@@ -56,8 +61,8 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
             // nothing wraps it and an escape from the loop would strand it.
             val setPtr = try {
                 elements.forEachIndexed { i, el ->
-                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) } // PyTuple_SetItem steals; keep `el`'s own reference valid
-                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+                    val item = newElementReference(el) // PyTuple_SetItem steals a reference: a new one is made for it
+                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), item) }
                 }
                 python.multiplatform.ffi.Python3.withPython { PySet_New(tuplePtr) }
             } finally {
@@ -71,8 +76,11 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
     override var cachedNativeValue: Set<Any?>? = null
     override var cachedPyObjectValue: PyObject? = null
 
-    /** Snapshot conversion to a plain Kotlin set, recursively converting elements ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]). */
-    fun toNativeSet(): Set<Any?> = snapshotElements(pointer).mapTo(LinkedHashSet()) { pyObjectToNative(it) }
+    /**
+     * Snapshot conversion to a plain Kotlin set, recursively converting elements
+     * ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]): the mermaid's `+toSet() Set`.
+     */
+    fun toSet(): Set<Any?> = snapshotElements(pointer).mapTo(LinkedHashSet()) { pyObjectToNative(it) }
 
     /** `self | other`, via `PyNumber_Or` (CPython dispatches `set.__or__` through the number protocol). */
     fun union(other: PySet): PySet {
@@ -106,63 +114,49 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
 
     override fun isEmpty(): Boolean = size == 0
 
-    override fun iterator(): MutableIterator<PyObject> {
-        val snapshot = snapshotElements(pointer)
-        return object : MutableIterator<PyObject> {
-            var index = 0
-            var lastReturned: PyObject? = null
-            override fun hasNext(): Boolean = index < snapshot.size
-            override fun next(): PyObject {
-                if (!hasNext()) throw NoSuchElementException()
-                val el = snapshot[index++]
-                lastReturned = el
-                return el
-            }
-            override fun remove() {
-                val el = lastReturned ?: throw IllegalStateException("next() has not been called, or remove() already called")
-                this@PySet.remove(el)
-                lastReturned = null
-            }
-        }
-    }
+    override fun iterator(): PyIterator = SnapshotIterator(snapshotElements(pointer)) { this@PySet.remove(it) }
 
-    override fun contains(element: PyObject): Boolean {
-        val result = python.multiplatform.ffi.Python3.withPython { PySet_Contains(pointer, element.pointer) }
+    override fun contains(element: Any?): Boolean {
+        val result = withPythonElement(element) { item -> python.multiplatform.ffi.Python3.withPython { PySet_Contains(pointer, item) } }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check set membership")
         return result == 1
     }
 
-    override fun containsAll(elements: Collection<PyObject>): Boolean = elements.all { contains(it) }
+    override fun containsAll(elements: Collection<Any?>): Boolean = elements.all { contains(it) }
 
-    override fun add(element: PyObject): Boolean {
-        if (contains(element)) return false
+    override fun add(element: Any?): Boolean = withPythonElement(element) { item -> addPointer(item) }
+
+    private fun addPointer(item: NativePointer): Boolean {
+        val present = python.multiplatform.ffi.Python3.withPython { PySet_Contains(pointer, item) }
+        if (present == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check set membership")
+        if (present == 1) return false
         // PySet_Add does not steal a reference to `key`.
-        if (python.multiplatform.ffi.Python3.withPython { PySet_Add(pointer, element.pointer) } != 0) throw PyException.fromCurrentError() ?: PyException("set.add() failed")
+        if (python.multiplatform.ffi.Python3.withPython { PySet_Add(pointer, item) } != 0) throw PyException.fromCurrentError() ?: PyException("set.add() failed")
         return true
     }
 
-    override fun addAll(elements: Collection<PyObject>): Boolean {
+    override fun addAll(elements: Collection<Any?>): Boolean {
         var changed = false
         for (e in elements) if (add(e)) changed = true
         return changed
     }
 
-    override fun remove(element: PyObject): Boolean {
-        val rc = python.multiplatform.ffi.Python3.withPython { PySet_Discard(pointer, element.pointer) }
+    override fun remove(element: Any?): Boolean {
+        val rc = withPythonElement(element) { item -> python.multiplatform.ffi.Python3.withPython { PySet_Discard(pointer, item) } }
         if (rc == -1) throw PyException.fromCurrentError() ?: PyException("set.discard() failed")
         return rc == 1
     }
 
-    override fun removeAll(elements: Collection<PyObject>): Boolean {
+    override fun removeAll(elements: Collection<Any?>): Boolean {
         var changed = false
         for (e in elements) if (remove(e)) changed = true
         return changed
     }
 
-    override fun retainAll(elements: Collection<PyObject>): Boolean {
+    override fun retainAll(elements: Collection<Any?>): Boolean {
         var changed = false
         for (e in snapshotElements(pointer)) {
-            if (elements.none { pyEquals(it.pointer, e.pointer) }) {
+            if (elements.none { other -> withPythonElement(other) { pyEquals(it, e.pointer) } }) {
                 remove(e)
                 changed = true
             }
