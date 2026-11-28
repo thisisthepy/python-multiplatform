@@ -511,17 +511,50 @@ when it is used and keeps that dict when the dict's name is bound again, as CPyt
 used as the views above are, and by a `for` loop (CPython's dict iterator, so a dict that changes size raises), its
 truth (`if ks`, `not ks`, `bool(ks)`), and binding it to another view name of the same view and kinds. Anything else of
 a view name (subscript, a dict method, `==`, the set operators, `list()` / `dict()` of it, putting it in a list or a
-dict, passing or returning it) is refused naming the view. In a library an export may bind views of its dict
+dict) is refused naming the view. A view is also passed to a function and returned from one (agent proposal, not
+confirmed): the parameter or result is annotated `KeysView[K]`, `ValuesView[V]` or `ItemsView[K, V]`, imported by
+`from collections.abc import KeysView, ValuesView, ItemsView` (the one `from` import of an AOT program, for annotations
+only), and it holds the view's dict as a view name does; a view of a dict made in the callee keeps that dict alive. A
+KeysView does not name the values of its dict, nor a ValuesView its keys, and the view reads only its half, so a
+`KeysView[str]` parameter takes the keys of a `dict[str, int]` and of a `dict[str, float]` alike (`ir.view_match`).
+The argument is a view of that half (`d.keys()`, a view name, a call of a function returning one); a dict or another
+view is refused naming both views. A call returning a view is used as a view is (a `for` loop, len(), `in`, its truth,
+the repr, binding it to a view name, passing it on). A method returns a view the same way (`def names(self) ->
+KeysView[str]: return self.items.keys()`, called as `obj.names()` on a local of the class, the call method_call
+makes directly); a view does not cross the library boundary (aot/export). In a library an export may bind views of its dict
 parameter: a view name is only read, so it is no write (aot/library-dict-write). `set(xs)` of a list[str] or list[int] name and `set([a, b])`
 follow too. A dict crosses the library boundary as `dict[int, int]`, `dict[int, float]` and `dict[int, bool]` (8.1 to
 8.3, ABI version 3): the library only reads a dict parameter of an export (aot/library-dict-write otherwise, through
-the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. Still to come
-in S2b: a view passed to a function or returned from one (annotated `KeysView[K]`, `ValuesView[V]`, `ItemsView[K, V]`,
-which needs `from collections.abc import ...` in an AOT program).
+the callees it is passed to), so one handle may be shared by threads without the per-dict lock of tier T. What S2b
+listed is in place (agent proposal, not confirmed).
 
 **S2c.** List, dict and set comprehensions (a hidden local per comprehension variable, Python 3 scoping, the
-accumulator built in place), `enumerate`, `zip` (shortest), `reversed`, `range` objects as iterables, in `for` loops
-and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
+accumulator built in place). First step in (agent proposal, not confirmed): a comprehension that is the whole value
+of an assignment to a name or of a `return` is rewritten into the loop it means before lowering
+(typedpython/comprehensions.py). Each variable becomes a hidden local typed by Pyrefly at a probe (a
+`[(x, y,) for x in xs for y in ys]` put before the statement in the copy Pyrefly types, the clauses without their
+conditions, so a variable has its declared type). The accumulator is hidden and typed as its target, so the target is
+bound once the comprehension is complete and `xs = [x + 1 for x in xs]` iterates the old list. The first iterable is
+evaluated first, and a dict comprehension's key before its value (through a temporary of the key type). A
+comprehension anywhere else (an operand, an argument) is refused as "bind it to a name first", and so are `:=` and a
+comprehension, generator or lambda inside one. Second step in (agent proposal, not confirmed): `enumerate` and
+`zip` as the iterable of a `for` loop or of a comprehension clause (typedpython/loops.py), each unpacked into names.
+`for i, x in enumerate(it, start)` takes any iterable a loop takes and an int constant start; it is the loop over
+`it` with a hidden counter bound to `i` before the body, so a `continue` counts and `i` keeps its last value after
+the loop. `for a, b in zip(xs, ys)` takes names of lists or strs (or a str constant) that the loop does not rebind;
+it reads each by index while the index is below every length, the lengths read at each step left to right, so a
+list that grows in the loop is seen growing as CPython's list iterator sees it. zip's names are typed as the
+elements of the operands, from the type Pyrefly gives each operand in the `for` header. A dict or a set operand
+is refused (zip reads by index), and so are `strict=`, a single name as the target, and enumerate or zip anywhere
+else. `for x in reversed(xs)` (also inside enumerate()) takes the same operands and reads from the end, the index
+checked against the length at every step as CPython's reversed list iterator checks it: a list that shrinks in the
+loop ends it early, one that grows is not seen growing. A range object held in a name (`r = range(a, b, STEP)`,
+typedpython/ranges.py) is its start and stop in hidden int locals, its length computed once per binding, and its
+constant step; a `for` loop over it (also in a comprehension or an enumerate()), len(), `in`, its truth and its
+repr (print, str, repr, an f-string) are rewritten into what CPython computes. A step that is not an int
+constant, a step of 0 (CPython's ValueError at run time, refused at compile time here), a name bound to a range
+and to anything else, and any other use (passing, returning, indexing, list(), zip(), reversed()) are refused.
+Then `zip` and `reversed` of other iterables, range objects passed and indexed, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
 empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
 lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
 the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable

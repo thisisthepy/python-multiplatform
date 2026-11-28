@@ -953,8 +953,9 @@ class _Checker:
             self.error(TYPE, f"{what} target {var!r} must be a declared {ir.dict_vtype(want).value} local"
                              + (f" of kinds {want!r}" if isinstance(want, tuple) else ""))
 
-    def dict_same(self, a: ir.DictKinds | None, b: ir.DictKinds | None, what: str) -> None:
-        if a is not None and b is not None and a != b:
+    def dict_same(self, a: ir.DictKinds | None, b: ir.DictKinds | None, what: str, view: str | None = None) -> None:
+        """`a` is `b`; of a view (`Param.view`, `Function.return_view`, a DictView value), the half the view reads."""
+        if a is not None and b is not None and not ir.view_match(view, a, b):
             self.error(TYPE, f"{what}: a dict of {a!r} where a dict of {b!r} is wanted")
 
     def param_class(self, p: Param) -> None:
@@ -1641,7 +1642,7 @@ class _Checker:
                 self.slot(a, p.type, f"argument {k + 1} of '{e.function}'")
                 if self.aot and type(p) is Param and p.type in (Type.DICT, Type.DICT_LIST) \
                         and getattr(a, "type", None) is p.type:
-                    self.dict_same(self.kinds_any(a), p.kinds, f"argument {k + 1} of '{e.function}'")
+                    self.dict_same(self.kinds_any(a), p.kinds, f"argument {k + 1} of '{e.function}'", p.view)
         # SPEC N-13: a redo Call of an i64-returning callee gives an INT (the redone value is any int)
         int_result = (redo_ok and callee.returns is Type.I64 and e.type is Type.INT)
         if e.type is not callee.returns and not int_result:
@@ -2819,7 +2820,8 @@ class _Checker:
             self.slot(value, self.scalars[target], f"assignment to '{target}'")
             if self.aot and self.scalars[target] in (Type.DICT, Type.DICT_LIST) \
                     and getattr(value, "type", None) is self.scalars[target]:
-                self.dict_same(self.kinds_any(value), self.fn.dict_kinds.get(target), f"assignment to '{target}'")
+                self.dict_same(self.kinds_any(value), self.fn.dict_kinds.get(target), f"assignment to '{target}'",
+                               value.view if isinstance(value, DictView) else None)
             if getattr(value, "type", None) is Type.NONE:
                 self.error(TYPE, f"None assigned to '{target}'")
         if target in self.entry:
@@ -3549,7 +3551,7 @@ class _Checker:
         if isinstance(returns, Type):
             self.slot(value, returns, "return value")
             if self.aot and returns in (Type.DICT, Type.DICT_LIST) and getattr(value, "type", None) is returns:
-                self.dict_same(self.kinds_any(value), self.fn.return_kinds, "the return value")
+                self.dict_same(self.kinds_any(value), self.fn.return_kinds, "the return value", self.fn.return_view)
         if self.aot and getattr(value, "type", None) in ir.ARRAYS:
             self.error(TYPE, f"a list is returned from a function returning {getattr(returns, 'value', returns)}")
         return dataclasses.replace(s, value=value), None
