@@ -22,7 +22,7 @@ stands on is now a test in `wasmJsTest/.../emscripten/`, run against the real in
 | the shared memory survives CPython growing it | `WasmSharedMemoryGrowthTest` |
 | Kotlin-only work neither grows nor writes that memory | `WasmKotlinLeavesLinearMemoryAloneTest` |
 | the interpreter carries the `pyemscripten_2026_0` ABI | `WasmInterpreterAbiTest` |
-| ... and a real compiled wheel loads and runs in it | `WasmCompiledWheelTest` (wheels: `python-multiplatform/scripts/wasm/build-cpython.sh wheels`) |
+| ... and a real compiled wheel loads and runs in it | `WasmCompiledWheelTest` (wheels: `src/wasmJsTest/resources/wheels/`) |
 | direct calls beat a JS frame; hoisting beats a shim; strings and bulk reads | `WasmCrossingOverheadTest` |
 | `Table.set` beats `addFunction` + a JS closure for upcalls | `WasmUpcallRouteOverheadTest` |
 | `PY_CALL_TRAMPOLINE`'s JS fallback is live; `pmp_invoke` survives the wasm one | `WasmCallTrampolineTest` |

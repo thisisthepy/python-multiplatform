@@ -2113,22 +2113,13 @@ val buildWasmPython by tasks.registering(Exec::class) {
 }
 
 /**
- * Where `python-multiplatform/scripts/wasm/build-cpython.sh wheels` puts the pinned compiled wheels the wasm suite loads
- * (`wasmJsTest/.../WasmCompiledWheelTest`). Not checked in: they are downloaded by URL and accepted
- * only against the sha256 the script pins.
+ * The compiled wheels the wasm suite loads (`wasmJsTest/.../WasmCompiledWheelTest`): test fixtures
+ * checked in under `src/wasmJsTest/resources/wheels/`, built by pypackpack (#82) and pinned by sha256
+ * in the test and the README beside them (leader, 2026-11-27). `-PwasmWheelsDir` overrides it.
  */
 val wasmWheelsDir: String = (project.findProperty("wasmWheelsDir")?.toString()
     ?: System.getenv("PMP_WASM_WHEELS_DIR")
-    ?: rootProject.layout.projectDirectory.dir(".caches/wasm-wheels").asFile.absolutePath)
-
-/** Downloads the pinned wheels into [wasmWheelsDir]. Network, a few MB; nothing depends on it. */
-val fetchWasmWheels by tasks.registering(Exec::class) {
-    group = "python"
-    description = "Downloads the pinned pyemscripten_2026_0 wheels the wasm suite loads into .caches/"
-    val script = rootProject.layout.projectDirectory.file("python-multiplatform/scripts/wasm/build-cpython.sh").asFile
-    environment("WASM_WHEELS_DIR", wasmWheelsDir)
-    commandLine("bash", script.absolutePath, "wheels")
-}
+    ?: layout.projectDirectory.dir("src/wasmJsTest/resources/wheels").asFile.absolutePath)
 
 /**
  * The test-only tail of the test bundle's `cpython-config.mjs`: where the wheels were extracted, and
@@ -2699,7 +2690,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
 
     onlyIf { wasmRuntimePresent(pythonDir.resolve("python.mjs")) }
 
-    // Fetching the wheels changes what WasmCompiledWheelTest can prove, so it re-runs the suite.
+    // Changing the wheels changes what WasmCompiledWheelTest can prove, so it re-runs the suite.
     inputs.files(fileTree(wasmWheelsDir) { include("*.whl") })
         .withPropertyName("wasmWheels").optional()
 
@@ -2737,7 +2728,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
             logger.lifecycle(
                 "No wheels in $wasmWheelsDir -- WasmCompiledWheelTest will " +
                     (if (requireWasmRuntime) "FAIL (-PrequireWasmRuntime)" else "skip") +
-                    ". Fetch them with python-multiplatform/scripts/wasm/build-cpython.sh wheels (or :python-multiplatform:fetchWasmWheels)."
+                    ". The fixtures live in python-multiplatform/src/wasmJsTest/resources/wheels (see its README)."
             )
         }
         dir.resolve("cpython-config.mjs").appendText(
