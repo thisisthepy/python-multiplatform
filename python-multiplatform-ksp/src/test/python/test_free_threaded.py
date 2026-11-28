@@ -50,6 +50,11 @@ SOURCE = '''\
 
 
 @compiled
+def mon_probe(x: int) -> int:
+    return x + 1
+
+
+@compiled
 class Cell:
     __slots__ = ("a", "b")
     a: object
@@ -302,7 +307,7 @@ def built(tmp_path_factory):
     compiled = {f.name for f in result.module.functions}
     wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "fill_down_int", "edge_int", "rotate", "zero2",
               "pair_edge", "usek", "fresh", "vpick", "three", "bump1", "bump2", "seven", "order3", "sum3",
-              "win1", "win2"}
+              "win1", "win2", "mon_probe"}
     assert wanted <= compiled, {n: result.skipped.get(n) for n in wanted - compiled}
     fns = {f.name: f for f in result.module.functions}
     assert fns["vpick"].virtual == ("c",) and fns["fresh"].virtual == ()   # #143: one virtual, one real
@@ -632,9 +637,68 @@ def test_shared_list_read_modify_write_equals_a_serialisation(extension):
                             for _ in range(THREADS)])
         k = (T_PER * THREADS) % n
         want = [float(i) for i in list(range(k, n)) + list(range(k))]
-        print(json.dumps({"ok": shared == want, "errs": errs}))
+        print(json.dumps({"ok": shared == want, "errs": errs, "deopts": m.__typedpython_deopts__}))
     """)
-    assert r == {"ok": True, "errs": []}
+    # (the deopt count is reported, not asserted: a red run says whether the interpreted original, which takes no
+    # lock, ran; CI windows shard of pmp18 45973628546 was red here once)
+    assert r["ok"] is True and r["errs"] == [], r
+
+
+def test_the_monitoring_cache_is_per_thread_and_never_stale(extension):
+    """tp_traced caches whether a sys.monitoring tool listens, per monitoring version. While the version a thread
+    sees is unchanged since its last check, the cached answer must be the one for that version, whatever other
+    threads checked meanwhile: a call made while a PY_START tool listens for the whole call must run the interpreted
+    original (the event fires). The main thread switches the tool on and off while workers call; a phase number
+    that is odd only while the events are on (raised after switching on, before switching off) tells a worker its
+    call ran entirely inside an "on" span. A cache shared by every thread without synchronisation (the statics of
+    before) can keep a stale "off" after concurrent checks (agent proposal, not owner-confirmed)."""
+    r = run_child(extension, """
+        mon = sys.monitoring
+        TOOL = 4
+        mon.use_tool_id(TOOL, "tp-stale-test")
+        orig = m.__typedpython_interpreted__["mon_probe"].__code__
+        seen = {}
+        def cb(code, offset):
+            if code is orig:
+                t = threading.get_ident()
+                seen[t] = seen.get(t, 0) + 1
+        mon.register_callback(TOOL, mon.events.PY_START, cb)
+        phase = [0]
+        stop = [False]
+        stale = []
+        calls = [0]
+        checked = {}
+        def worker():
+            t = threading.get_ident()
+            n = 0
+            while not stop[0]:
+                p0 = phase[0]
+                c0 = seen.get(t, 0)
+                m.mon_probe(1)
+                n += 1
+                if p0 % 2 == 1 and phase[0] == p0:
+                    checked[t] = checked.get(t, 0) + 1
+                    if seen.get(t, 0) == c0:
+                        stale.append(p0)
+            calls[0] += n
+        rt = threading.Thread(target=lambda: errs.extend(run_threads([worker] * 6)))
+        errs = []
+        rt.start()
+        for i in range(60 * STRESS):
+            mon.set_events(TOOL, mon.events.PY_START)
+            phase[0] += 1
+            time.sleep(0.0005)
+            phase[0] += 1
+            mon.set_events(TOOL, 0)
+            time.sleep(0.0005)
+        stop[0] = True
+        rt.join()
+        mon.register_callback(TOOL, mon.events.PY_START, None)
+        mon.free_tool_id(TOOL)
+        print(json.dumps({"stale": len(stale), "errs": errs, "checked": sum(checked.values())}))
+    """)
+    assert r["stale"] == 0 and r["errs"] == [] and r["checked"] > 0, r
+    print("monitoring stress", r)
 
 
 def test_two_shared_lists(extension):

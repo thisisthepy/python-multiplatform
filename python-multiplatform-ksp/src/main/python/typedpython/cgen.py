@@ -493,7 +493,7 @@ def _all_exprs(f: ir.Function):
 def _traced_call(k: int) -> str:
     """tp_traced for the function whose interpreted original is `names[k]` (SPEC N-14). The code
     object is a strong reference in the module state, filled at module exec."""
-    return (f"tp_traced(tp_module, tp_ts, (PyCodeObject *)((tp_state *)PyModule_GetState(tp_module))->orig_code[{k}])")
+    return (f"tp_traced(tp_module, tp_ts, tp_t, (PyCodeObject *)((tp_state *)PyModule_GetState(tp_module))->orig_code[{k}])")
 
 
 def _can_deopt(e: ir.Expr, functions: dict[str, ir.Function]) -> bool:
