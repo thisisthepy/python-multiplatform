@@ -55,7 +55,8 @@ TABLE = [
     # aot/generator
     ("aot/generator", "def f(n: int):\n    yield n\n", (ERR, None, "yield", 2)),
     ("aot/generator", "def f(n: int):\n    yield from n\n", (ERR, None, "yield from", 2)),
-    ("aot/generator", "def f(n: int) -> int:\n    return sum(i for i in range(n))\n", (ERR, None, "generator expression", 2)),
+    # (tier S2c: `return sum(i for i in range(n))` compiles, leader 2026-11-28; a generator held in a name does not)
+    ("aot/generator", "def f(n: int) -> int:\n    g = (i for i in range(n))\n    return 0\n", (ERR, None, "generator expression", 2)),
     # aot/async
     ("aot/async", "async def f() -> None:\n    pass\n", (ERR, None, "async def", 1)),
     ("aot/async", "async def f(x: int) -> int:\n    return await x\n", (ERR, None, "await", 2)),
@@ -114,7 +115,8 @@ TABLE = [
     ("aot/exception", "def f() -> None:\n    raise ValueError('x')\n", (PEND, "S", "raise", 2)),
     ("aot/exception", "def f() -> None:\n    try:\n        pass\n    finally:\n        pass\n", (PEND, "S", "try", 2)),
     ("aot/exception", "def f(x: int) -> None:\n    assert x\n", (PEND, "S", "assert", 2)),
-    ("aot/builtin", "def f(a: list[int]) -> list[int]:\n    return sorted(a)\n", (PEND, "S", "sorted", 2)),
+    # (tier S2c: `return sorted(a)` compiles; sorted() anywhere else is pending)
+    ("aot/builtin", "def f(a: list[int]) -> int:\n    return len(sorted(a))\n", (PEND, "S", "sorted", 2)),
     ("aot/builtin", "def f(x: int) -> str:\n    return format(x)\n", (PEND, "S", "format", 2)),
     # aot/threading (pending T)
     ("aot/threading", "import threading\n", (PEND, "T", "threading", 1)),
@@ -209,16 +211,74 @@ def test_enumerate_and_zip_as_the_iterable_of_a_loop_are_not_reported(tmp_path):
                 print(w)
             for i, x in enumerate(reversed(xs)):
                 print(i, x)
+            t = sum(xs)
+            v = sorted(xs, reverse=True)
+            v.sort()
+            u = any(range(t))
+            print(u)
             return [i * x for i, x in enumerate(xs)]
     """)
     report = aotcheck.check(path, front_end=False)
     assert report.findings == [], report.lines()
     path = write(tmp_path, """
         def f(xs: list[int]) -> int:
-            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs)))
+            return len(list(zip(xs, xs))) + sum(1 for _ in enumerate(xs)) + len(list(reversed(xs))) + int(all(xs)) + len(sorted(xs))
     """)
     names = {f.name for f in aotcheck.check(path, front_end=False).findings}
-    assert {"zip", "enumerate", "reversed"} <= names, names
+    assert {"zip", "enumerate", "reversed", "sum", "all", "sorted"} <= names, names
+
+
+def test_bytes_are_not_reported(tmp_path):
+    """Tier S2c: bytes literals, `bytes()`, `bytes(n)`, `bytes(xs)`, `s.encode()` and `b.decode()` compile; a string
+    method that is not compiled is still pending."""
+    path = write(tmp_path, """
+        def f(s: str, xs: list[int]) -> str:
+            b = s.encode()
+            c = b"ab" + bytes(2) + bytes(xs) + bytes()
+            return c.decode("utf-8") + "x".encode().decode()
+    """)
+    report = aotcheck.check(path, front_end=False)
+    assert report.findings == [], report.lines()
+
+
+def test_a_key_function_is_not_reported(tmp_path):
+    """Tier S2c: the key= of sorted() / min() / max() bound to a name or returned and of `xs.sort(...)`, a function's
+    name or a lambda, compiles (the front end checks the rest); a lambda anywhere else is still reported."""
+    path = write(tmp_path, """
+        def g(v: int) -> int:
+            return -v
+
+        def f(xs: list[int], ws: list[str]) -> int:
+            a = sorted(xs, key=g)
+            b = sorted(ws, key=lambda w: w[1:], reverse=True)
+            xs.sort(key=lambda v: v % 3)
+            m = min(xs, key=g)
+            n = max(ws, key=len, default="")
+            h = lambda v: v
+            return len(a) + len(b) + m + len(n) + h(1)
+    """)
+    report = aotcheck.check(path, front_end=False)
+    got = sorted((f.line, f.rule, f.name) for f in report.findings)
+    assert [(r, n) for _, r, n in got] == [("aot/closure", "lambda")], report.lines()
+    assert got[0][0] == 10, report.lines()
+
+
+def test_a_generator_argument_of_a_placed_reducer_is_not_reported(tmp_path):
+    """Tier S2c (leader 2026-11-28): a generator expression that is the argument of sum() / any() / all() / min() /
+    max() / sorted() bound to a name or returned is the loop it means; a generator anywhere else is still reported."""
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> int:
+            a = sum(x * 2 for x in xs if x)
+            b = any(x > 1 for x in xs)
+            c = sorted((x for x in xs), key=lambda v: -v)
+            d = max((x for x in xs), default=0)
+            g = (x for x in xs)
+            return a + int(b) + len(c) + d + len(list(g))
+    """)
+    report = aotcheck.check(path, front_end=False)
+    got = sorted((f.line, f.rule, f.name) for f in report.findings)
+    assert ("aot/generator", "generator expression") in [(r, n) for _, r, n in got], report.lines()
+    assert all(line == 6 for line, r, _ in got if r == "aot/generator"), report.lines()
 
 
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):

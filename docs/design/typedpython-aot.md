@@ -554,14 +554,54 @@ constant step; a `for` loop over it (also in a comprehension or an enumerate()),
 repr (print, str, repr, an f-string) are rewritten into what CPython computes. A step that is not an int
 constant, a step of 0 (CPython's ValueError at run time, refused at compile time here), a name bound to a range
 and to anything else, and any other use (passing, returning, indexing, list(), zip(), reversed()) are refused.
-Then `zip` and `reversed` of other iterables, range objects passed and indexed, in `for` loops and comprehensions; `sum`, `any`, `all`, `min` / `max` of an iterable (`ValueError: min() iterable argument is
-empty`); `sorted(xs, key=..., reverse=...)` and `list.sort(...)` with a key that is a compiled function or a
-lambda written in place: CPython's own algorithm (timsort, `listsort` in Objects/listobject.c, ported as it is), so
-the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. `bytes`: an immutable
-byte array; literals, `s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError),
-`b.decode()` (strict UTF-8, CPython's UnicodeDecodeError message), `len`, indexing (an int), slicing, `+`, `*`, `==`,
-`in`, iteration (ints), `print` / `repr` (`b'...'` with CPython's escapes), `bytes(n)` and `bytes(list[int])`
-(`ValueError: bytes must be in range(0, 256)`).
+`sum(it[, start])`, `any(it)` and `all(it)` bound to a name or returned are the loop each means over any iterable a
+`for` loop takes (typedpython/comprehensions.py): an int sum adds as CPython's int path does; a float sum takes a
+float constant start (with the default int start an empty sum is the int 0, which a float cannot hold) and adds
+with CPython's compensated summation (Neumaier, `cs_add` / `cs_to_double` in Python/bltinmodule.c), so
+`sum([0.1] * 10, 0.0) == 1.0` as in CPython; any() and all() stop at the first true or false item; `min(it)` and `max(it)` keep the first item and replace it by
+one that compares strictly smaller (larger), as CPython's `min_max` does (a NaN first stays), and of an empty
+iterable raise CPython's `ValueError: min() iterable argument is empty` (an `ir.Raise` statement, made only by
+this rewrite: a `raise` of the program stays refused); with `default=d` an empty iterable gives `d` instead (agent
+proposal, not confirmed; `d` a constant or a name of the items' type, since the loop reads it before the iterable);
+with `key=k` each item's key is computed as the item is read, and the item kept with its key is replaced by one whose
+key compares strictly smaller (larger), as `min_max` does (agent proposal, not confirmed; items of int, float, str,
+bool or tuples of them, keys of those types). A generator expression as the argument of such a call is
+the loop it means (leader, 2026-11-28: "accept them as the argument of sum/any/all/min/max/sorted, rewritten into the
+loop, as long as Python semantics (laziness, short-circuit for any/all) are preserved"): its first iterable is
+evaluated first, each item is computed when the call would take it, so any() and all() stop computing at the first
+true (false) item; a generator anywhere else stays refused (section 4). `sum(it, start)` with a start that is not a
+constant or a name is refused unless the iterable is a name, since the loop reads the start first and CPython the
+iterable first (a defect found here, for every iterable). Then `zip` and `reversed` of other iterables, range
+objects passed and indexed, in `for` loops and comprehensions. `sorted(it, key=k)` and `xs.sort(key=k)` are in
+(agent proposal, not confirmed): `k` is the name of a function or a lambda of one parameter, inlined where the key
+is applied (its body binds nothing and makes no function). As `list_sort_impl` does, `reverse` is evaluated first,
+then every key, left to right, into a hidden list (a key that raises stops the sort before any item moved), then
+CPython's listsort orders (key, position) pairs by key only (`TPA__DEF_KEYSORT`, the same `TPA__DEF_SORT`, so the
+pairs move as CPython moves its keys and values together) and each list is moved by the positions (one list, or
+every element list of a list of tuples). Keys are int (raw or big), float or str; a tuple key is not in yet. While
+CPython computes the keys of `xs.sort` the list is empty, so a key that reaches `xs` sees `[]`: `xs.sort(key=k)` is
+refused unless its items are int, float, str, bool, bytes, `str | None` or tuples of them and every name the key
+reads that the function binds holds one of those (sort a copy with sorted() otherwise). Without a key it is in (agent proposal, not confirmed): `xs.sort(reverse=r)` of a list of int,
+float or str, and `sorted(it, reverse=r)` bound to a name or returned (the list built by the loop, then sorted),
+are CPython's own algorithm (timsort, `listsort` in Objects/listobject.c of 3.15.0rc1, the embedded version, ported
+as it is in tp_aot.h as `TPA__DEF_SORT`; 3.15 takes a minrun per run, `minrun_next`, where 3.14 took one for the
+list, which orders NaN differently), so the order of equal and of unordered elements (NaN) is CPython's, not
+merely some stable order. A fuzz of the port against CPython 3.15.0rc1's sorted() over lists of floats with NaN
+(lengths 0 to 3000) found no difference. `bytes` is in (agent proposal, not confirmed): `Type.BYTES`, an immutable
+byte array held as a `tpa_str` of kind 1 whose code points are the bytes, so ownership, `+`, `*`, slicing,
+comparison (by unsigned byte), `in` of a bytes and `len` are the str nodes and functions (a bytes literal is the
+static Latin-1 str literal of the same bytes); a local, a parameter or a return value. Literals,
+`s.encode()` / `encode("utf-8")` (strict: a surrogate raises CPython's UnicodeEncodeError, its range the run of
+surrogates), `b.decode()` / `decode("utf-8")` (strict UTF-8, a port of stringlib's `utf8_decode` of 3.15.0rc1:
+CPython's UnicodeDecodeError with its reason, invalid start byte, invalid continuation byte or unexpected end of
+data, and its range), indexing (an int; `IndexError: index out of range`), `int in b` (`ValueError: byte must be in
+range(0, 256)`), iteration (ints: the bytes held, an index loop), truth, `print` / `str` / `repr` / an f-string field
+(`b'...'`, PyBytes_Repr's smart quotes and escapes), `bytes()`, `bytes(n)` (`ValueError: negative count`),
+`bytes(xs)` of a list[int] and `bytes([...])` (`ValueError: bytes must be in range(0, 256)`). A fuzz of the C
+decoder, encoder and repr against CPython 3.15.0rc1 (60,004 byte strings of up to 8 bytes) found no difference.
+Refused, each with its reason: a bytes in a list, a dict, a class field or across the library boundary, `bytes ==
+str` (never equal in CPython), an encoding other than utf-8, `errors=`, the other bytes methods, `bytes(s, enc)`
+and `%` formatting.
 
 **Tests.** `test_aot_tier_s2a.py`, `_s2b.py`, `_s2c.py`: differential over generated cases (random operation
 sequences on lists and dicts checked against the reference, every error message), aliasing (two names of one list,

@@ -72,6 +72,8 @@ class Type(Enum):
     STR = "str"            # AOT mode only (tier S1, PR-S1a): a Python str, a counted `tpa_str` (runtime/tp_aot_str.h)
     STR_LIST = "list[str]"  # AOT mode only (tier S1b): a list of str, a counted `tpa_str_list` (fixed length until S2)
     STR_OPT = "str | None"  # AOT mode only (tier S2a): a `tpa_str *` that is NULL for None
+    BYTES = "bytes"         # AOT mode only (tier S2c): a Python bytes, a counted `tpa_str` of kind 1 whose code points
+    #                         are the bytes (runtime/tp_aot_str.h); a local, a parameter or a return value
     STR_OPT_LIST = "list[str | None]"  # AOT mode only (tier S2a): a `tpa_str_list` whose items may be NULL (None)
     OBJ_LIST = "list[obj]"  # AOT mode only (tier S2a): a list of instances of one compiled class, a counted
     #                         `tpa_obj_list`; the element class is the `cls` of the Param / FieldDecl / return, or
@@ -743,6 +745,29 @@ class ListClear(Stmt):
 
 
 @dataclass(frozen=True)
+class ListSort(Stmt):
+    """`array.sort(reverse=...)` (tier S2c): CPython's listsort without a key (tp_aot.h `TPA__DEF_SORT`), of a list of
+    int, float or str. `reverse` is BOOL, evaluated before the sort."""
+
+    array: str
+    reverse: Expr
+
+
+@dataclass(frozen=True)
+class ListSortKeyed(Stmt):
+    """The keyed sort of tier S2c (comprehensions.py `KEYSORT`): `keys` (a list of int, float or str, one key per item,
+    computed before) gives the order; CPython's listsort sorts the (key, position) pairs by key only (tp_aot.h
+    `tpa_keysort_*`), reversed before and after when `reverse` (BOOL, evaluated first) is true, and every list of
+    `arrays` (one list, or the element lists of a list of tuples, each as long as `keys`) is permuted by the result:
+    what list_sort_impl does moving the keys and the items together. A list whose length is no longer the keys'
+    raises CPython's ValueError("list modified during sort")."""
+
+    keys: str
+    reverse: Expr
+    arrays: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ListReverse(Stmt):
     """`array.reverse()`."""
 
@@ -1015,6 +1040,16 @@ class TimeSleep(Stmt):
 
 
 @dataclass(frozen=True)
+class Raise(Stmt):
+    """AOT mode, tier S2c: raise the builtin exception `kind` (a `TPA_` kind of the runtime, "ValueError") with the
+    fixed message CPython gives it where a rewrite of the AST stands for a builtin that raises (`min()` of an empty
+    iterable: "min() iterable argument is empty"). Not a `raise` statement of the program, which stays refused."""
+
+    kind: str
+    message: str
+
+
+@dataclass(frozen=True)
 class SysExit(Stmt):
     """`sys.exit([code])` (AOT executable mode only; refused in `aot-lib`). `code` is I64 or None."""
 
@@ -1052,7 +1087,7 @@ class FString(Expr):
 
 @dataclass(frozen=True)
 class StrConcat(Expr):
-    """`left + right` of two STR (type STR). `s += t` on a STR name is `Assign(s, StrConcat(Local s, t))`; the back
+    """`left + right` of two STR (type STR), or of two BYTES (tier S2c, type BYTES). `s += t` on a STR name is `Assign(s, StrConcat(Local s, t))`; the back
     end grows the name's string in place when nothing else holds it (design 4.3.1, the ownership rule)."""
 
     left: Expr
@@ -1061,7 +1096,7 @@ class StrConcat(Expr):
 
 @dataclass(frozen=True)
 class StrRepeat(Expr):
-    """`value * count` or `count * value` (type STR); `value` STR, `count` I64. `count_first`: the int was the
+    """`value * count` or `count * value` (type STR, or BYTES of a BYTES value: tier S2c); `value` STR, `count` I64. `count_first`: the int was the
     left operand (it is evaluated first)."""
 
     value: Expr
@@ -1071,7 +1106,8 @@ class StrRepeat(Expr):
 
 @dataclass(frozen=True)
 class StrCompare(Expr):
-    """`left <op> right` of two STR (type BOOL): equality by content, order by code point."""
+    """`left <op> right` of two STR, or of two BYTES (tier S2c), (type BOOL): equality by content, order by code point
+    (for bytes, by unsigned byte)."""
 
     op: CompareKind
     left: Expr
@@ -1080,7 +1116,8 @@ class StrCompare(Expr):
 
 @dataclass(frozen=True)
 class StrContains(Expr):
-    """`needle in hay` (`negate`: `not in`) of two STR (type BOOL); `needle` is evaluated first."""
+    """`needle in hay` (`negate`: `not in`) of two STR or two BYTES (tier S2c) (type BOOL); `needle` is evaluated
+    first."""
 
     needle: Expr
     hay: Expr
@@ -1089,7 +1126,7 @@ class StrContains(Expr):
 
 @dataclass(frozen=True)
 class StrLen(Expr):
-    """`len(value)` of a STR (type I64, in [0, 2**62])."""
+    """`len(value)` of a STR or a BYTES (type I64, in [0, 2**62])."""
 
     value: Expr
 
@@ -1104,7 +1141,7 @@ class StrIndex(Expr):
 
 @dataclass(frozen=True)
 class StrSlice(Expr):
-    """`value[start:stop:step]` (type STR); each bound I64 or None (absent), evaluated in that order."""
+    """`value[start:stop:step]` of a STR (type STR) or a BYTES (type BYTES); each bound I64 or None (absent), evaluated in that order."""
 
     value: Expr
     start: Expr | None
@@ -1114,10 +1151,69 @@ class StrSlice(Expr):
 
 @dataclass(frozen=True)
 class StrOf(Expr):
-    """`str(value)` or (`repr`) `repr(value)` of an I64, F64, BOOL or STR (type STR)."""
+    """`str(value)` or (`repr`) `repr(value)` of an I64, F64, BOOL or STR (type STR); of a BYTES both are `b'...'`."""
 
     value: Expr
     repr: bool = False
+
+
+@dataclass(frozen=True)
+class BytesIndex(Expr):
+    """`value[index]` of a BYTES (tier S2c, type I64 in [0, 255]); `index` I64 (an int outside 64 bits is CPython's
+    IndexError), CPython's IndexError("index out of range")."""
+
+    value: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class BytesContainsInt(Expr):
+    """`needle in hay` (`negate`: `not in`) of an I64 needle and a BYTES hay (tier S2c, type BOOL); a needle outside
+    range(0, 256) is CPython's ValueError("byte must be in range(0, 256)"). `needle` is evaluated first."""
+
+    needle: Expr
+    hay: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class StrEncode(Expr):
+    """`value.encode()` / `value.encode("utf-8")` of a STR (tier S2c, type BYTES): strict UTF-8, a surrogate is
+    CPython's UnicodeEncodeError."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class BytesDecode(Expr):
+    """`value.decode()` / `value.decode("utf-8")` of a BYTES (tier S2c, type STR): strict UTF-8, CPython's
+    UnicodeDecodeError with its reason and range."""
+
+    value: Expr
+
+
+@dataclass(frozen=True)
+class BytesNew(Expr):
+    """`bytes(count)` (tier S2c, type BYTES): `count` zero bytes, `count` I64; a negative count is CPython's
+    ValueError("negative count")."""
+
+    count: Expr
+
+
+@dataclass(frozen=True)
+class BytesFromList(Expr):
+    """`bytes(array)` of a list[int] local or parameter (tier S2c, type BYTES); an item outside range(0, 256) is
+    CPython's ValueError("bytes must be in range(0, 256)")."""
+
+    array: str
+
+
+@dataclass(frozen=True)
+class BytesDisplay(Expr):
+    """`bytes([e0, e1, ...])` of I64 items (tier S2c, type BYTES): every item is evaluated, left to right, then the
+    first outside range(0, 256) is CPython's ValueError("bytes must be in range(0, 256)")."""
+
+    items: tuple[Expr, ...]
 
 
 @dataclass(frozen=True)

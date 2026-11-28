@@ -65,7 +65,7 @@ _INTROSPECTION_CALLS = frozenset({"getattr", "setattr", "delattr", "hasattr"})
 _INTROSPECTION_ATTRS = frozenset({"__dict__", "__class__", "__slots__", "__bases__", "__mro__"})
 _KERNEL_BUILTINS = frozenset()
 _SET_BUILTINS_S = frozenset({"sorted", "sum", "any", "all", "enumerate", "zip", "reversed", "format"})
-_CONTAINER_CALLS = frozenset({"dict", "set", "tuple", "bytes"})
+_CONTAINER_CALLS = frozenset({"dict", "set", "tuple"})
 _SUPPORTED_CALLS = frozenset({"len", "range", "float", "bool", "isinstance", "type", "list", "print", "int", "abs", "min", "max",
                               "ord", "chr", "repr", "str"})     # (ord ... str: tier S1, PR-S1a)
 _SIGNAL_EXCEPTIONS = frozenset({"KeyboardInterrupt", "RecursionError"})
@@ -307,6 +307,19 @@ class _Pass(ast.NodeVisitor):
         iters += [i.args[0] for i in iters if isinstance(i, ast.Call) and isinstance(i.func, ast.Name)
                   and i.func.id == "enumerate" and i.args]
         self.loop_iterables = {id(i) for i in iters}
+        self.reducers = {id(c) for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s)) is not None} \
+            if isinstance(module.tree, ast.Module) else set()
+        # ... and the key= lambda of such a call, or of `xs.sort(key=...)` as a statement (comprehensions.py inlines it)
+        keyed = [c for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s)
+                                                       or comprehensions._keyed_sort_of(s)) is not None] \
+            if isinstance(module.tree, ast.Module) else []
+        self.reduced_generators = {id(c.args[0]) for c in keyed if c.args and isinstance(c.args[0], ast.GeneratorExp)}
+        self.loop_iterables |= {id(g.iter) for c in keyed if c.args and isinstance(c.args[0], ast.GeneratorExp)
+                                for g in c.args[0].generators}
+        self.key_lambdas = {id(k) for c in keyed if isinstance(k := comprehensions._key_of(c), ast.Lambda)}
+        # (an iterable of such a call is the iterable of a loop too)
+        self.loop_iterables |= {id(c.args[0]) for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s))
+                                is not None} if isinstance(module.tree, ast.Module) else set()
 
     # -- helpers
 
@@ -539,6 +552,9 @@ class _Pass(ast.NodeVisitor):
     # -- expressions
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
+        if id(node) in self.key_lambdas:
+            self.generic_visit(node)            # tier S2c: a key, inlined where the key is applied
+            return
         self.error("aot/closure", "lambda", node, "`lambda` makes a closure, which is outside the AOT subset")
         self.generic_visit(node)
 
@@ -560,6 +576,10 @@ class _Pass(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        if id(node) in self.reduced_generators:
+            # tier S2c: the argument of a placed sum() ... sorted(), the loop it means (leader 2026-11-28)
+            self.comprehension(node, "generator expression")
+            return
         self.error("aot/generator", "generator expression", node, "a generator expression is lazy, which is outside the AOT subset")
         self.comprehension(node, "generator expression")
 
@@ -624,7 +644,8 @@ class _Pass(ast.NodeVisitor):
         elif isinstance(f, ast.Attribute):
             if ((isinstance(f.value, ast.Constant) and isinstance(f.value.value, str)) or (
                     isinstance(f.value, ast.Name) and self.kinds.get(f.value.id) == "str")) \
-                    and f.attr not in frontend.STR_METHODS:          # (the methods of tier S1b compile)
+                    and f.attr not in frontend.STR_METHODS and f.attr != "encode":   # (the methods of tier S1b
+                #                                                                      compile; encode: tier S2c)
                 self.pending("S", "aot/str", f.attr, node, f"the string method `{f.attr}` is tier S1b (strings), not compiled "
                                                           "yet (syntactic: a str literal or a name annotated `str`)")
         self.generic_visit(node)
@@ -645,6 +666,8 @@ class _Pass(ast.NodeVisitor):
                 self.error("aot/introspection", "type", node, "`type(name, bases, dict)` builds a class at run time")
         elif n in _KERNEL_BUILTINS:
             self.pending("K", "aot/builtin", n, node, f"`{n}()` is not compiled without CPython yet (tier K)")
+        elif n in comprehensions.REDUCERS and id(node) in self.reducers:
+            return                              # tier S2c: sum() / any() / all() bound to a name or returned
         elif n in ("enumerate", "zip", "reversed") and id(node) in self.loop_iterables:
             return                              # tier S2c (the front end checks the operands and the target)
         elif n in _SET_BUILTINS_S:
@@ -653,6 +676,8 @@ class _Pass(ast.NodeVisitor):
             return                              # tier S2b: `dict(d)`, a copy of a dict (the front end checks it)
         elif n == "set" and len(node.args) <= 1 and not node.keywords:
             return                              # tier S2b: `set()`, `set(s)` (the front end checks s is a set)
+        elif n == "bytes" and len(node.args) <= 1 and not node.keywords:
+            return                              # tier S2c: `bytes()`, `bytes(n)`, `bytes(xs)` (the front end checks it)
         elif n in _CONTAINER_CALLS:
             self.pending("S", "aot/container", n, node, f"`{n}()` is tier S (general containers), not compiled yet")
         elif n in _SUPPORTED_CALLS:

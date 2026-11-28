@@ -1209,6 +1209,17 @@ static TPA_UNUSED void tpa_str_list_reverse(tpa_str_list *l)
     }
 }
 
+/* Tier S2c: list.sort() of a list[str], CPython's listsort (TPA__DEF_SORT in tp_aot.h) in code point order */
+#define TPA__LT_STR(a, b) (tpa_str_cmp((a), (b)) < 0)
+TPA__DEF_SORT(tpa_sort_str, tpa_str *, TPA__LT_STR)
+static TPA_UNUSED int tpa_str_list_sort(tpa_str_list *l, int reverse)
+{
+    return tpa_sort_str__listsort(l->d, l->len, reverse);
+}
+/* Tier S2c: sorting by str keys (TPA__DEF_KEYSORT in tp_aot.h), in code point order */
+#define TPA__LT_KSTR(a, b) (tpa_str_cmp((a).k, (b).k) < 0)
+TPA__DEF_KEYSORT(tpa_str_keysort, tpa_str *, tpa_str_list, TPA__LT_KSTR)
+
 /* A growing list while split builds its result (a private buffer, not a value). */
 typedef struct {
     tpa_str **d;
@@ -1945,5 +1956,341 @@ static TPA_UNUSED int tpa_str_opt_list_repr(tpa_str_list *l, tpa_str **out)
     free(parts);
     return rc;
 }
+
+/* ------------------------------------------------------------------------------------------
+ * Tier S2c (design 4.3.2, agent proposal, not owner-confirmed): `bytes`. A bytes value is a `tpa_str` of kind 1 whose
+ * code points are its bytes, so ownership, +, *, slicing, ==, ordering (unsigned bytes, as memcmp), `in` of a bytes
+ * and len are the str functions above; a bytes literal is the static Latin-1 str of the same bytes. What differs is
+ * here: an item is an int, repr is b'...', and the strict UTF-8 codec (Objects/stringlib/codecs.h of 3.15.0rc1).
+ * ------------------------------------------------------------------------------------------ */
+
+#define TPA_MSG_BYTE_RANGE "byte must be in range(0, 256)"
+#define TPA_MSG_BYTES_RANGE "bytes must be in range(0, 256)"
+
+/* b[i]: an int; CPython's IndexError("index out of range"). */
+static TPA_UNUSED int tpa_bytes_index(tpa_str *b, int64_t i, int64_t *out)
+{
+    if (i < 0) {
+        i += b->len;
+    }
+    if (i < 0 || i >= b->len) {
+        return tpa_raise(TPA_IndexError, "index out of range");
+    }
+    *out = TPA_STR_DATA(b)[i];
+    return 0;
+}
+
+/* `x in b` of an int x (an int outside 64 bits arrives clamped, as PyNumber_AsSsize_t(x, NULL) clamps it). */
+static TPA_UNUSED int tpa_bytes_contains_int(tpa_str *b, int64_t x, int *out)
+{
+    if (x < 0 || x >= 256) {
+        return tpa_raise(TPA_ValueError, TPA_MSG_BYTE_RANGE);
+    }
+    *out = b->len > 0 && memchr(TPA_STR_DATA(b), (int)x, (size_t)b->len) != NULL;
+    return 0;
+}
+
+/* bytes(n): n zero bytes; CPython's ValueError("negative count"). */
+static TPA_UNUSED int tpa_bytes_zeros(int64_t n, tpa_str **out)
+{
+    tpa_str *r;
+    if (n < 0) {
+        return tpa_raise(TPA_ValueError, "negative count");
+    }
+    if (tpa_str__alloc(n, 1, &r)) {
+        return -1;
+    }
+    memset(TPA_STR_DATA(r), 0, (size_t)n);
+    *out = r;
+    return 0;
+}
+
+/* bytes(xs) of a list[int] whose items are int64 (`big` 0) or tagged ints (`big` 1); the first item outside
+ * range(0, 256) raises CPython's ValueError. */
+static TPA_UNUSED int tpa_bytes__from_items(const void *items, int big, int64_t n, tpa_str **out)
+{
+    tpa_str *r;
+    int64_t i;
+    if (tpa_str__alloc(n, 1, &r)) {
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        int64_t v;
+        if (big) {
+            v = tpa_int_clamp_index(((const tpa_int *)items)[i]);
+        }
+        else {
+            v = ((const int64_t *)items)[i];
+        }
+        if (v < 0 || v >= 256) {
+            free(r);
+            return tpa_raise(TPA_ValueError, TPA_MSG_BYTES_RANGE);
+        }
+        TPA_STR_DATA(r)[i] = (unsigned char)v;
+    }
+    *out = r;
+    return 0;
+}
+
+static TPA_UNUSED int tpa_bytes_from_i64_list(tpa_i64_list *l, tpa_str **out)
+{
+    return tpa_bytes__from_items(l->d, 0, l->len, out);
+}
+
+static TPA_UNUSED int tpa_bytes_from_int_list(tpa_int_list *l, tpa_str **out)
+{
+    return tpa_bytes__from_items(l->d, 1, l->len, out);
+}
+
+/* repr(b), also str(b): PyBytes_Repr with smart quotes. */
+static TPA_UNUSED int tpa_bytes_repr(tpa_str *b, tpa_str **out)
+{
+    static const char hex[] = "0123456789abcdef";
+    const unsigned char *d = TPA_STR_DATA(b);
+    int has_single = 0, has_double = 0;
+    unsigned char quote;
+    int64_t i, n = 3, k = 0;
+    tpa_str *r;
+    unsigned char *o;
+    for (i = 0; i < b->len; i++) {
+        has_single |= d[i] == '\'';
+        has_double |= d[i] == '"';
+    }
+    quote = (has_single && !has_double) ? '"' : '\'';
+    for (i = 0; i < b->len; i++) {
+        unsigned char c = d[i];
+        if (n > INT64_MAX - 4) {
+            return tpa_raise(TPA_OverflowError, "bytes object is too large to make repr");
+        }
+        n += (c == quote || c == '\\' || c == '\t' || c == '\n' || c == '\r') ? 2 : (c < ' ' || c >= 0x7f) ? 4 : 1;
+    }
+    if (tpa_str__alloc(n, 1, &r)) {
+        return -1;
+    }
+    o = TPA_STR_DATA(r);
+    o[k++] = 'b';
+    o[k++] = quote;
+    for (i = 0; i < b->len; i++) {
+        unsigned char c = d[i];
+        if (c == quote || c == '\\') {
+            o[k++] = '\\';
+            o[k++] = c;
+        }
+        else if (c == '\t' || c == '\n' || c == '\r') {
+            o[k++] = '\\';
+            o[k++] = c == '\t' ? 't' : (c == '\n' ? 'n' : 'r');
+        }
+        else if (c < ' ' || c >= 0x7f) {
+            o[k++] = '\\';
+            o[k++] = 'x';
+            o[k++] = (unsigned char)hex[c >> 4];
+            o[k++] = (unsigned char)hex[c & 15u];
+        }
+        else {
+            o[k++] = c;
+        }
+    }
+    o[k] = quote;
+    *out = r;
+    return 0;
+}
+
+/* s.encode() / s.encode("utf-8"): strict, so the first surrogate raises CPython's UnicodeEncodeError, whose range is
+ * the run of consecutive surrogates it starts (unicode_encode_utf8, the strict handler). */
+static TPA_UNUSED int tpa_str_encode(tpa_str *s, tpa_str **out)
+{
+    char m[160];
+    char buf[4];
+    int64_t i, n = 0, k = 0;
+    tpa_str *r;
+    if (s->kind == 1) {
+        for (i = 0; i < s->len; i++) {
+            n += tpa_str_at(s, i) < 0x80u ? 1 : 2;
+        }
+    }
+    else {
+        for (i = 0; i < s->len; i++) {
+            uint32_t c = tpa_str_at(s, i);
+            if (tpa_str__is_surrogate(c)) {
+                int64_t end = i + 1;
+                while (end < s->len && tpa_str__is_surrogate(tpa_str_at(s, end))) {
+                    end += 1;
+                }
+                if (end - i == 1) {
+                    snprintf(m, sizeof m, "'utf-8' codec can't encode character '\\u%04x' in position %lld: "
+                             "surrogates not allowed", (unsigned)c, (long long)i);
+                }
+                else {
+                    snprintf(m, sizeof m, "'utf-8' codec can't encode characters in position %lld-%lld: "
+                             "surrogates not allowed", (long long)i, (long long)(end - 1));
+                }
+                return tpa_raise(TPA_UnicodeEncodeError, m);
+            }
+            n += c < 0x80u ? 1 : (c < 0x800u ? 2 : (c < 0x10000u ? 3 : 4));
+        }
+    }
+    if (tpa_str__alloc(n, 1, &r)) {
+        return -1;
+    }
+    for (i = 0; i < s->len; i++) {
+        size_t w = tpa_int__utf8_put(tpa_str_at(s, i), buf);
+        memcpy(TPA_STR_DATA(r) + k, buf, w);
+        k += (int64_t)w;
+    }
+    *out = r;
+    return 0;
+}
+
+#define TPA__CONT(c) (((c) & 0xC0u) == 0x80u)
+
+/* One step of stringlib's utf8_decode at d[*pos] (end: the length): 0 decoded (`*cp`, *pos advanced) or the data
+ * ended inside a sequence, 1 invalid start byte, 2..4 invalid continuation byte after 1..3 bytes. *ended: 1 when 0
+ * means the data ended (unexpected end of data). */
+static int tpa_bytes__utf8_step(const unsigned char *d, int64_t end, int64_t *pos, uint32_t *cp, int *ended)
+{
+    int64_t s = *pos;
+    uint32_t ch = d[s], ch2, ch3, ch4;
+    *ended = 0;
+    if (ch < 0x80u) {
+        *cp = ch;
+        *pos = s + 1;
+        return 0;
+    }
+    if (ch < 0xE0u) {
+        if (ch < 0xC2u) {
+            return 1;
+        }
+        if (end - s < 2) {
+            *ended = 1;
+            return 0;
+        }
+        ch2 = d[s + 1];
+        if (!TPA__CONT(ch2)) {
+            return 2;
+        }
+        *cp = (ch << 6) + ch2 - ((0xC0u << 6) + 0x80u);
+        *pos = s + 2;
+        return 0;
+    }
+    if (ch < 0xF0u) {
+        if (end - s < 3) {
+            if (end - s < 2) {
+                *ended = 1;
+                return 0;
+            }
+            ch2 = d[s + 1];
+            if (!TPA__CONT(ch2) || (ch2 < 0xA0u ? ch == 0xE0u : ch == 0xEDu)) {
+                return 2;
+            }
+            *ended = 1;
+            return 0;
+        }
+        ch2 = d[s + 1];
+        ch3 = d[s + 2];
+        if (!TPA__CONT(ch2) || (ch == 0xE0u && ch2 < 0xA0u) || (ch == 0xEDu && ch2 >= 0xA0u)) {
+            return 2;
+        }
+        if (!TPA__CONT(ch3)) {
+            return 3;
+        }
+        *cp = (ch << 12) + (ch2 << 6) + ch3 - ((0xE0u << 12) + (0x80u << 6) + 0x80u);
+        *pos = s + 3;
+        return 0;
+    }
+    if (ch < 0xF5u) {
+        if (end - s < 4) {
+            if (end - s < 2) {
+                *ended = 1;
+                return 0;
+            }
+            ch2 = d[s + 1];
+            if (!TPA__CONT(ch2) || (ch2 < 0x90u ? ch == 0xF0u : ch == 0xF4u)) {
+                return 2;
+            }
+            if (end - s < 3) {
+                *ended = 1;
+                return 0;
+            }
+            if (!TPA__CONT(d[s + 2])) {
+                return 3;
+            }
+            *ended = 1;
+            return 0;
+        }
+        ch2 = d[s + 1];
+        ch3 = d[s + 2];
+        ch4 = d[s + 3];
+        if (!TPA__CONT(ch2) || (ch == 0xF0u && ch2 < 0x90u) || (ch == 0xF4u && ch2 >= 0x90u)) {
+            return 2;
+        }
+        if (!TPA__CONT(ch3)) {
+            return 3;
+        }
+        if (!TPA__CONT(ch4)) {
+            return 4;
+        }
+        *cp = (ch << 18) + (ch2 << 12) + (ch3 << 6) + ch4 - ((0xF0u << 18) + (0x80u << 12) + (0x80u << 6) + 0x80u);
+        *pos = s + 4;
+        return 0;
+    }
+    return 1;
+}
+
+/* b.decode() / b.decode("utf-8"): strict; the first error raises CPython's UnicodeDecodeError with its reason and
+ * range (unicode_decode_utf8: unexpected end of data covers the rest, an invalid start byte one byte, an invalid
+ * continuation byte the bytes before it). */
+static TPA_UNUSED int tpa_bytes_decode(tpa_str *b, tpa_str **out)
+{
+    const unsigned char *d = TPA_STR_DATA(b);
+    int64_t pos = 0, n = 0, start, stop, k;
+    uint32_t cp, maxc = 0;
+    int rc, ended;
+    const char *why;
+    char m[200];
+    tpa_str *r;
+    while (pos < b->len) {                       /* pass 1: validate, count, find the kind */
+        start = pos;
+        rc = tpa_bytes__utf8_step(d, b->len, &pos, &cp, &ended);
+        if (rc == 0 && !ended) {
+            n += 1;
+            if (cp > maxc) {
+                maxc = cp;
+            }
+            continue;
+        }
+        if (rc == 0) {
+            why = "unexpected end of data";
+            stop = b->len;
+        }
+        else if (rc == 1) {
+            why = "invalid start byte";
+            stop = start + 1;
+        }
+        else {
+            why = "invalid continuation byte";
+            stop = start + rc - 1;
+        }
+        if (stop == start + 1) {
+            snprintf(m, sizeof m, "'utf-8' codec can't decode byte 0x%02x in position %lld: %s", (unsigned)d[start],
+                     (long long)start, why);
+        }
+        else {
+            snprintf(m, sizeof m, "'utf-8' codec can't decode bytes in position %lld-%lld: %s", (long long)start,
+                     (long long)(stop - 1), why);
+        }
+        return tpa_raise(TPA_UnicodeDecodeError, m);
+    }
+    if (tpa_str__alloc(n, tpa_str__kind_of(maxc), &r)) {
+        return -1;
+    }
+    for (pos = 0, k = 0; pos < b->len; k++) {    /* pass 2: the code points (valid now) */
+        tpa_bytes__utf8_step(d, b->len, &pos, &cp, &ended);
+        tpa_str__put(r, k, cp);
+    }
+    *out = r;
+    return 0;
+}
+
+#undef TPA__CONT
 
 #endif /* TP_AOT_STR_H */

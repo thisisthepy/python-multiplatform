@@ -362,16 +362,18 @@ from .ir import (
 )
 from .ir import (
     ArgvInt, ArgvLen, BoolToInt, Cond, FloatToInt, FormatField, FString, ListDisplay, Print,
-    ReturnTuple, StrToInt, SysExit, TimeCall, TimeFunc, TimeSleep, Unpack,
+    ReturnTuple, StrToInt, SysExit, TimeCall, TimeFunc, TimeSleep, Unpack, Raise,
 )
 from .ir import (
     ArgvStr, ForStr, StrChr, StrCompare, StrConcat, StrContains, StrIndex, StrLen, StrOf, StrOrd, StrParseInt,
     StrRepeat, StrSlice, StrWrite, StrMethod, StrListDisplay, StrListLen, StrListIndex, StrNarrow,
 )
+from .ir import BytesContainsInt, BytesDecode, BytesDisplay, BytesFromList, BytesIndex, BytesNew, StrEncode
 from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
+from .ir import ListSort, ListSortKeyed
 from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, ListSetSlice
 from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore, StrListStore, TupleIndex
 from .ir import (
@@ -433,16 +435,20 @@ _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, ToI
                     GetItem, Contains, NewList, NewDict, Format, BuildString})
 _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
                     FieldSet, StoreItem, ForObj})
+# The builtin exceptions an `ir.Raise` names (each a `TPA_` kind of the runtime)
+RAISE_KINDS = frozenset({"ValueError"})
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
-_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, ForStr,
-                        ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListRemove,
+_AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, Raise, ForStr,
+                        ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListSort, ListSortKeyed, ListRemove,
                         ListDelete, ListSetSlice, ObjListStore, StrListStore, ForObjList,     # tier S2a
                         *ir.DICT_STMTS})                                                      # tier S2b
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
                         # tier S1 (PR-S1a): the STR nodes, and an f-string that is a str value
                         StrConcat, StrRepeat, StrCompare, StrContains, StrLen, StrIndex, StrSlice, StrOf, StrOrd,
                         StrChr, ArgvStr, StrParseInt, StrWrite, FString,
+                        # tier S2c: bytes (the str nodes above also take two BYTES operands)
+                        BytesIndex, BytesContainsInt, StrEncode, BytesDecode, BytesNew, BytesFromList, BytesDisplay,
                         # tier S1b
                         StrMethod, StrListDisplay, StrListLen, StrListIndex,
                         StrNarrow, ListPop, ListSearch, ListStr, ListCompare, ListConcat, ListRepeat, ListSlice,
@@ -461,8 +467,9 @@ _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local m
 _AOT_STR_TYPES = (Type.STR, Type.STR_LIST, Type.STR_OPT, Type.STR_OPT_LIST)    # AOT mode, tier S1/S2a: what a local
 #                                                                                   may also hold
 _STR_LISTS = (Type.STR_LIST, Type.STR_OPT_LIST)   # the two `tpa_str_list` types (list[str] S1b, list[str | None] S2a)
-_AOT_VALUE_TYPES = (*_AOT_STR_TYPES, Type.OBJ_LIST, Type.DICT, Type.DICT_LIST)    # ... and a list[C] (tier S2a), a
-#                                                                                     dict and a list of dicts (S2b)
+_AOT_VALUE_TYPES = (*_AOT_STR_TYPES, Type.OBJ_LIST, Type.DICT, Type.DICT_LIST,     # ... and a list[C] (tier S2a), a
+                    Type.BYTES)                                                     # dict and a list of dicts (S2b),
+#                                                                                     a bytes (S2c)
 _LOCAL_TYPES = _VALUE_TYPES + (Type.INT,)       # an INT lives only in a local or a temporary (SPEC N-13)
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 # The nodes that produce an INT (an owned tp_int: native, or a PyLong once promoted).
@@ -1126,6 +1133,8 @@ class _Checker:
             ok = self.aot and type(v) is str  # tier S1: any text (the back end embeds its code points)
         if t is Type.STR_OPT:
             ok = self.aot and v is None       # tier S2a: None of a `str | None`
+        if t is Type.BYTES:
+            ok = self.aot and type(v) is bytes   # tier S2c: any bytes (the back end embeds them)
         if not ok:
             self.error(TYPE, f"constant {v!r} does not match type {t.value}")
         return e
@@ -1187,6 +1196,8 @@ class _Checker:
             return (0, _LEN_MAX)            # tier S1: a length (tier S2b: a dict's)
         if cls is StrOrd:
             return (0, 0x10FFFF)
+        if cls is BytesIndex:
+            return (0, 255)                 # tier S2c: a byte
         if cls is Len:
             return self.len_interval(e.array)
         if cls is Cond:          # AOT mode: either branch
@@ -1247,6 +1258,8 @@ class _Checker:
             return (0, _LEN_MAX)            # tier S1: a length (tier S2b: a dict's)
         if cls is StrOrd:
             return (0, 0x10FFFF)
+        if cls is BytesIndex:
+            return (0, 255)                 # tier S2c: a byte
         if cls is Len:
             return self.len_interval(e.array)
         if cls is Index:
@@ -2064,8 +2077,9 @@ class _Checker:
         orelse = self.expr(e.orelse, state)
         self.dead -= dead
         self.refine, self.facts = entry, base
-        if e.type not in ir.SCALARS and e.type not in (Type.STR, Type.STR_OPT):
-            self.error(TYPE, f"a conditional expression is a scalar or a str, node says {getattr(e.type, 'value', e.type)}")
+        if e.type not in ir.SCALARS and e.type not in (Type.STR, Type.STR_OPT, Type.BYTES):
+            self.error(TYPE, f"a conditional expression is a scalar, a str or a bytes, node says "
+                             f"{getattr(e.type, 'value', e.type)}")
         else:
             self.slot(then, e.type, "the value of a conditional expression")
             self.slot(orelse, e.type, "the else value of a conditional expression")
@@ -2107,10 +2121,18 @@ class _Checker:
             self.error(TYPE, "an FString outside a Print argument is a str")
         return self.fstring(e, state)
 
-    def str_operand(self, x: ir.Expr, state: _State, what: str) -> ir.Expr:
+    def str_operand(self, x: ir.Expr, state: _State, what: str, want: Type = Type.STR) -> ir.Expr:
         x = self.expr(x, state)
-        self.slot(x, Type.STR, what)
+        self.slot(x, want, what)
         return x
+
+    @staticmethod
+    def flavour(t: object) -> Type:
+        """The operand type of a str node (tier S2c): BYTES when the node is about bytes, else STR."""
+        return Type.BYTES if t is Type.BYTES else Type.STR
+
+    def bytes_operand(self, x: ir.Expr, state: _State, what: str) -> ir.Expr:
+        return self.str_operand(x, state, what, Type.BYTES)
 
     def int_operand(self, x: ir.Expr, state: _State, what: str) -> ir.Expr:
         x = self.expr(x, state)
@@ -2118,47 +2140,51 @@ class _Checker:
         return x
 
     def e_StrConcat(self, e: StrConcat, state: _State) -> ir.Expr:
-        left = self.str_operand(e.left, state, "left operand of str +")
-        right = self.str_operand(e.right, state, "right operand of str +")
-        self.result(e, Type.STR)
+        want = self.flavour(e.type)                      # tier S2c: two bytes give a bytes
+        left = self.str_operand(e.left, state, "left operand of str +", want)
+        right = self.str_operand(e.right, state, "right operand of str +", want)
+        self.result(e, want)
         return dataclasses.replace(e, left=left, right=right)
 
     def e_StrRepeat(self, e: StrRepeat, state: _State) -> ir.Expr:
         if type(e.count_first) is not bool:
             self.error(TYPE, "StrRepeat `count_first` is not a bool")
+        want = self.flavour(e.type)                      # tier S2c: a bytes repeated is a bytes
         if e.count_first:
             count = self.int_operand(e.count, state, "count of str *")
-            value = self.str_operand(e.value, state, "str operand of *")
+            value = self.str_operand(e.value, state, "str operand of *", want)
         else:
-            value = self.str_operand(e.value, state, "str operand of *")
+            value = self.str_operand(e.value, state, "str operand of *", want)
             count = self.int_operand(e.count, state, "count of str *")
-        self.result(e, Type.STR)
+        self.result(e, want)
         return dataclasses.replace(e, value=value, count=count)
 
     def e_StrCompare(self, e: StrCompare, state: _State) -> ir.Expr:
         if type(e.op) is not CompareKind:
             self.error(UNKNOWN, f"StrCompare op {e.op!r} is not a CompareKind")
-        if e.op in (CompareKind.EQ, CompareKind.NE):     # tier S2a: equality also of a `str | None`
+        want = self.flavour(getattr(e.left, "type", None))     # tier S2c: two bytes compare as bytes
+        if e.op in (CompareKind.EQ, CompareKind.NE) and want is Type.STR:   # tier S2a: also of a `str | None`
             left, right = self.expr(e.left, state), self.expr(e.right, state)
             for x in (left, right):
                 if getattr(x, "type", None) not in (Type.STR, Type.STR_OPT):
                     self.error(TYPE, "a str equality compares two str or `str | None` values")
         else:
-            left = self.str_operand(e.left, state, "left operand of a str comparison")
-            right = self.str_operand(e.right, state, "right operand of a str comparison")
+            left = self.str_operand(e.left, state, "left operand of a str comparison", want)
+            right = self.str_operand(e.right, state, "right operand of a str comparison", want)
         self.result(e, Type.BOOL)
         return dataclasses.replace(e, left=left, right=right)
 
     def e_StrContains(self, e: StrContains, state: _State) -> ir.Expr:
         if type(e.negate) is not bool:
             self.error(TYPE, "StrContains `negate` is not a bool")
-        needle = self.str_operand(e.needle, state, "left operand of `in`")
-        hay = self.str_operand(e.hay, state, "right operand of `in`")
+        want = self.flavour(getattr(e.hay, "type", None))      # tier S2c: a bytes in a bytes
+        needle = self.str_operand(e.needle, state, "left operand of `in`", want)
+        hay = self.str_operand(e.hay, state, "right operand of `in`", want)
         self.result(e, Type.BOOL)
         return dataclasses.replace(e, needle=needle, hay=hay)
 
     def e_StrLen(self, e: StrLen, state: _State) -> ir.Expr:
-        value = self.str_operand(e.value, state, "argument of len()")
+        value = self.str_operand(e.value, state, "argument of len()", self.flavour(getattr(e.value, "type", None)))
         self.result(e, Type.I64)
         return dataclasses.replace(e, value=value)
 
@@ -2169,20 +2195,68 @@ class _Checker:
         return dataclasses.replace(e, value=value, index=index)
 
     def e_StrSlice(self, e: StrSlice, state: _State) -> ir.Expr:
-        value = self.str_operand(e.value, state, "sliced str")
+        want = self.flavour(e.type)                      # tier S2c: a slice of a bytes is a bytes
+        value = self.str_operand(e.value, state, "sliced str", want)
         bounds = [None if b is None else self.int_operand(b, state, "bound of a str slice")
                   for b in (e.start, e.stop, e.step)]
-        self.result(e, Type.STR)
+        self.result(e, want)
         return dataclasses.replace(e, value=value, start=bounds[0], stop=bounds[1], step=bounds[2])
 
     def e_StrOf(self, e: StrOf, state: _State) -> ir.Expr:
         if type(e.repr) is not bool:
             self.error(TYPE, "StrOf `repr` is not a bool")
         value = self.expr(e.value, state)
-        if getattr(value, "type", None) not in ir.SCALARS and getattr(value, "type", None) not in _AOT_STR_TYPES:
-            self.error(TYPE, "str() and repr() take an i64, f64, bool, str or list[str]")
+        if getattr(value, "type", None) not in ir.SCALARS and getattr(value, "type", None) not in (*_AOT_STR_TYPES,
+                                                                                                   Type.BYTES):
+            self.error(TYPE, "str() and repr() take an i64, f64, bool, str, list[str] or bytes")
         self.result(e, Type.STR)
         return dataclasses.replace(e, value=value)
+
+    # --- tier S2c: bytes ---
+
+    def e_BytesIndex(self, e: BytesIndex, state: _State) -> ir.Expr:
+        value = self.bytes_operand(e.value, state, "indexed bytes")
+        index = self.int_operand(e.index, state, "index of a bytes")
+        self.result(e, Type.I64)
+        return dataclasses.replace(e, value=value, index=index)
+
+    def e_BytesContainsInt(self, e: BytesContainsInt, state: _State) -> ir.Expr:
+        if type(e.negate) is not bool:
+            self.error(TYPE, "BytesContainsInt `negate` is not a bool")
+        needle = self.int_operand(e.needle, state, "left operand of `in` (an int)")
+        hay = self.bytes_operand(e.hay, state, "right operand of `in` (a bytes)")
+        self.result(e, Type.BOOL)
+        return dataclasses.replace(e, needle=needle, hay=hay)
+
+    def e_StrEncode(self, e: StrEncode, state: _State) -> ir.Expr:
+        value = self.str_operand(e.value, state, "receiver of str.encode()")
+        self.result(e, Type.BYTES)
+        return dataclasses.replace(e, value=value)
+
+    def e_BytesDecode(self, e: BytesDecode, state: _State) -> ir.Expr:
+        value = self.bytes_operand(e.value, state, "receiver of bytes.decode()")
+        self.result(e, Type.STR)
+        return dataclasses.replace(e, value=value)
+
+    def e_BytesNew(self, e: BytesNew, state: _State) -> ir.Expr:
+        count = self.int_operand(e.count, state, "argument of bytes()")
+        self.result(e, Type.BYTES)
+        return dataclasses.replace(e, count=count)
+
+    def e_BytesFromList(self, e: BytesFromList, state: _State) -> ir.Expr:
+        at = self.list_of(e.array, "bytes", state)
+        if at is not Type.I64_ARRAY and at is not None:
+            self.error(TYPE, f"bytes() of '{e.array}' ({at.value}): only a list of int")
+        self.result(e, Type.BYTES)
+        return e
+
+    def e_BytesDisplay(self, e: BytesDisplay, state: _State) -> ir.Expr:
+        if not isinstance(e.items, tuple):
+            self.error(STRUCTURE, "BytesDisplay items are not a tuple")
+            return e
+        items = tuple(self.int_operand(x, state, f"item {k + 1} of bytes([...])") for k, x in enumerate(e.items))
+        self.result(e, Type.BYTES)
+        return dataclasses.replace(e, items=items)
 
     def e_StrOrd(self, e: StrOrd, state: _State) -> ir.Expr:
         value = self.str_operand(e.value, state, "argument of ord()")
@@ -2680,6 +2754,11 @@ class _Checker:
         self.slot(secs, Type.F64, "argument of time.sleep")
         return dataclasses.replace(s, seconds=secs), state
 
+    def s_Raise(self, s: Raise, state: _State):
+        if s.kind not in RAISE_KINDS:
+            self.error(TYPE, f"Raise of {s.kind!r}: the AOT runtime raises only {', '.join(sorted(RAISE_KINDS))}")
+        return s, state
+
     def s_SysExit(self, s: SysExit, state: _State):
         if s.code is None:
             return s, state
@@ -2939,6 +3018,26 @@ class _Checker:
     def s_ListReverse(self, s: ListReverse, state: _State):
         self.list_changed(s.array, "reverse", state)
         return s, state
+
+    def s_ListSort(self, s: ListSort, state: _State):
+        reverse = self.expr(s.reverse, state)
+        self.slot(reverse, Type.BOOL, f"reverse of the sort of '{s.array}'")
+        at = self.list_changed(s.array, "sort", state)
+        if at not in (Type.I64_ARRAY, Type.F64_ARRAY, Type.STR_LIST) and at is not None:
+            self.error(TYPE, f"sort of '{s.array}' ({at.value}): only a list of int, float or str is sorted")
+        return dataclasses.replace(s, reverse=reverse), state
+
+    def s_ListSortKeyed(self, s: ListSortKeyed, state: _State):
+        reverse = self.expr(s.reverse, state)
+        self.slot(reverse, Type.BOOL, f"reverse of the keyed sort of '{s.keys}'")
+        kt = self.list_of(s.keys, "keyed sort", state)
+        if kt not in (Type.I64_ARRAY, Type.F64_ARRAY, Type.STR_LIST) and kt is not None:
+            self.error(TYPE, f"keys '{s.keys}' of a sort ({kt.value}): only int, float or str keys are sorted by")
+        if not s.arrays:
+            self.error(TYPE, f"keyed sort by '{s.keys}' of no list")
+        for a in s.arrays:
+            self.list_changed(a, "sort", state)
+        return dataclasses.replace(s, reverse=reverse), state
 
     def s_ListRemove(self, s: ListRemove, state: _State):
         at = self.list_changed(s.array, "remove", state)

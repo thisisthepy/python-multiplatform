@@ -3180,9 +3180,16 @@ typedef struct {
      * tree reaches a member of an epoch tree, and around the breaker call of a poll. */
     uint64_t tree_epoch;
     int poll_raised;                /* #414: a poll of that call raised (its handler's exception); same owner */
+    /* tp_traced's cache (SPEC N-14), this thread's own: the monitoring version it last checked, whether a tool
+     * listened at that version, and the PyMonitoringState PyMonitoring_EnterScope writes. One cache shared by
+     * every thread was a data race under free-threading: two checks that ended together could leave the newer
+     * version with the older answer, kept until the version moved again. */
+    uint64_t mon_ver;
+    int mon_on;
+    PyMonitoringState mon_state[1];
 } tp_tls;
 
-static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL, 0, 0};
+static TP_THREAD_LOCAL tp_tls tp_tls_v = {{0, NULL, 0, -1}, TP_POLL_INTERVAL, 0, NULL, 0, 0, 0, 0, {{0}}};
 
 static inline tp_tls *tp_tls_get(void)
 {
@@ -3525,9 +3532,6 @@ static TP_COLD int tp_epoch_moved(tp_tls *t)
  * tracer enabled by another thread during an entry is a benign race.
  * A monitoring tool turned on while a compiled function runs sees that function from its next call
  * on (SPEC N-14, known difference). */
-static uint64_t tp_mon_ver = 0;
-static int tp_mon_on = 0;
-static PyMonitoringState tp_mon_state[1];
 static const uint8_t tp_mon_event[1] = {PY_MONITORING_EVENT_PY_START};
 
 #if PY_VERSION_HEX >= 0x030F0000 && PY_VERSION_HEX < 0x03100000
@@ -3566,21 +3570,21 @@ static TP_COLD int tp_mon_scan(PyObject *module)
     return on;
 }
 
-static inline int tp_traced(PyObject *module, PyThreadState *ts, PyCodeObject *code)
+static inline int tp_traced(PyObject *module, PyThreadState *ts, tp_tls *t, PyCodeObject *code)
 {
-    uint64_t v = tp_mon_ver;
+    uint64_t v = t->mon_ver;
     /* sys.settrace / sys.setprofile (and PyEval_SetTrace / SetProfile): per thread, as in CPython.
      * c_tracefunc / c_profilefunc are public members of PyThreadState (cpython/pystate.h; coverage's
      * C tracer and Cython read them), the only internal-looking read here. */
     if (TP_UNLIKELY(ts->c_tracefunc != NULL || ts->c_profilefunc != NULL)) {
         return 1;
     }
-    PyMonitoring_EnterScope(tp_mon_state, &v, tp_mon_event, 1);
-    if (TP_UNLIKELY(v != tp_mon_ver)) {
-        tp_mon_on = tp_mon_scan(module);
-        tp_mon_ver = v;
+    PyMonitoring_EnterScope(t->mon_state, &v, tp_mon_event, 1);
+    if (TP_UNLIKELY(v != t->mon_ver)) {
+        t->mon_on = tp_mon_scan(module);
+        t->mon_ver = v;
     }
-    if (TP_UNLIKELY(tp_mon_on || code == NULL)) {
+    if (TP_UNLIKELY(t->mon_on || code == NULL)) {
         return 1;
     }
     {

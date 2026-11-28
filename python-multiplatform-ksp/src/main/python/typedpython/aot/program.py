@@ -40,7 +40,8 @@ LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are
 # builtin names a program must not rebind: the AOT mode compiles a call of each of these as the builtin
 BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list",
                            "str", "repr", "ord", "chr",        # (str ... chr: tier S1)
-                           "enumerate", "zip", "reversed"})     # (tier S2c: the iterable of a loop)
+                           "enumerate", "zip", "reversed",      # (tier S2c: the iterable of a loop)
+                           "sum", "any", "all", "sorted"})      # (tier S2c: the loop over an iterable)
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
@@ -128,6 +129,7 @@ class _Checker:
                  field_class: dict[tuple[str, str], str] | None = None) -> None:
         self.p = program
         self.rep = rep
+        self.reduced_generators: set[int] = set()   # tier S2c: generators that are the argument of sum() ... sorted()
         self.arity = arity
         self.has_math = has_math
         self.has_sys = has_sys
@@ -187,6 +189,8 @@ class _Checker:
             if recv is not None:
                 return self.field_list_class.get((recv, e.attr))        # a list field
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+            if e.func.id == "sorted" and e.args and "sorted" not in self.shadow:
+                return self._infer_list_class(e.args[0])                # tier S2c: sorted(xs, key=k) of a list[C]
             return self.func_return_list_class.get(e.func.id)
         if isinstance(e, ast.List) and e.elts:
             found = {self._infer_expr_class(x) for x in e.elts}
@@ -207,6 +211,8 @@ class _Checker:
             if isinstance(e.func, ast.Name):
                 if e.func.id in self.class_names:
                     return e.func.id
+                if e.func.id in ("min", "max") and len(e.args) == 1 and e.func.id not in self.shadow:
+                    return self._infer_list_class(e.args[0])            # tier S2c: min(xs, key=k) of a list[C]
                 return self.func_return_class.get(e.func.id)
             if isinstance(e.func, ast.Attribute) and isinstance(e.func.value, ast.Name):
                 recv_cls = self.var_classes.get(e.func.value.id)
@@ -225,8 +231,8 @@ class _Checker:
         if ann is None:
             self.rep.error(node, "aot/annotation", what, f"{what} has no type annotation (a program is checked "
                            "by its annotations)")
-        elif isinstance(ann, ast.Name) and (ann.id in SCALAR_NAMES or ann.id == "str"):     # str: tier S1
-            return
+        elif isinstance(ann, ast.Name) and (ann.id in SCALAR_NAMES or ann.id in ("str", "bytes")):
+            return                          # (str: tier S1; bytes: tier S2c)
         elif allow_none and isinstance(ann, ast.Constant) and ann.value is None:
             return
         elif _is_list_annotation(ann) or _is_str_list_annotation(ann) or _is_optional_str_annotation(ann):
@@ -572,8 +578,8 @@ class _Checker:
             if v is None:
                 return
             kind = type(v).__name__
-            if isinstance(v, str):
-                return                                              # tier S1
+            if isinstance(v, (str, bytes)):
+                return                                              # tier S1 (bytes: tier S2c)
             self.rep.error(e, "aot/literal", kind, f"a `{kind}` literal is outside the first AOT step")
         elif isinstance(e, ast.Name):
             if e.id in self.consts and e.id not in self.shadow:
@@ -642,7 +648,8 @@ class _Checker:
             self.subscript(e)
         elif isinstance(e, ast.Lambda):
             self.rep.error(e, "aot/expression", "lambda", "a lambda is outside the first AOT step")
-        elif isinstance(e, (ast.ListComp, ast.SetComp, ast.DictComp)):
+        elif isinstance(e, (ast.ListComp, ast.SetComp, ast.DictComp)) or (isinstance(e, ast.GeneratorExp)
+                                                                          and id(e) in self.reduced_generators):
             for g in e.generators:          # tier S2c: each clause is the loop it means (the front end checks the rest)
                 self.for_stmt(ast.copy_location(ast.For(target=g.target, iter=g.iter, body=[], orelse=[]), e))
                 for c in g.ifs:
@@ -655,6 +662,34 @@ class _Checker:
         else:
             kind = type(e).__name__
             self.rep.error(e, "aot/expression", kind, f"a `{kind}` expression is outside the first AOT step")
+
+    def key_function(self, k: ast.expr, items: ast.expr | None) -> None:
+        """Tier S2c: the key= of sorted() / list.sort() / min() / max(): the name of a function (a program function
+        or a builtin the front end calls) or a lambda of one positional parameter, whose body is checked as an
+        expression with the parameter a local (an instance of the items' class when the items are a list[C])."""
+        if isinstance(k, ast.Name):
+            self.expr(k)
+            return
+        if not isinstance(k, ast.Lambda):
+            self.rep.error(k, "aot/keyword", "key", f"the key= `{ast.unparse(k)}` is outside the AOT mode (the name of a "
+                           "function, or a lambda of one parameter)")
+            return
+        a = k.args
+        if len(a.args) != 1 or a.posonlyargs or a.kwonlyargs or a.vararg or a.kwarg or a.defaults:
+            self.rep.error(k, "aot/keyword", "key", f"the key `{ast.unparse(k)}` is a lambda of one parameter in an AOT "
+                           "program (no default, no other parameter)")
+            return
+        name = a.args[0].arg
+        saved_shadow, saved_classes = self.shadow, dict(self.var_classes)
+        self.shadow = self.shadow | {name}
+        self.var_classes.pop(name, None)
+        cls = self._infer_list_class(items) if items is not None else None
+        if cls is not None:
+            self.var_classes[name] = cls
+        try:
+            self.expr(k.body)
+        finally:
+            self.shadow, self.var_classes = saved_shadow, saved_classes
 
     def list_display(self, e: ast.List) -> None:
         if not e.elts:
@@ -696,6 +731,34 @@ class _Checker:
             if k.arg in str_kw:             # tier S1b: split(sep=, maxsplit=), replace(count=)
                 self.expr(k.value)
                 continue
+            if isinstance(f, ast.Name) and f.id == "sum" and k.arg == "start" and "sum" not in self.shadow:
+                self.expr(k.value)          # tier S2c: sum(xs, start=...)
+                continue
+            if ((isinstance(f, ast.Name) and f.id == "sorted" and "sorted" not in self.shadow)
+                    or (isinstance(f, ast.Attribute) and f.attr == "sort")) and k.arg in ("reverse", "key"):
+                if k.arg == "key":            # tier S2c: a function's name or a one-parameter lambda
+                    items = c.args[0] if isinstance(f, ast.Name) and c.args else \
+                        f.value if isinstance(f, ast.Attribute) else None
+                    self.key_function(k.value, items)
+                else:
+                    self.expr(k.value)
+                continue
+            if isinstance(f, ast.Attribute) and f.attr in ("encode", "decode") and k.arg in ("encoding", "errors"):
+                if k.arg == "errors":         # tier S2c: strict UTF-8 only
+                    self.rep.error(k.value, "aot/keyword", "errors", f"{f.attr}() takes no errors= in an AOT program "
+                                                                     "(strict UTF-8)")
+                else:
+                    self.expr(k.value)        # (the front end checks it is "utf-8")
+                continue
+            if isinstance(f, ast.Name) and f.id in ("min", "max") and f.id not in self.shadow:
+                if k.arg == "default" and len(c.args) == 1:
+                    self.expr(k.value)        # tier S2c: min(it, default=d) (comprehensions.py checks d)
+                elif k.arg == "key" and len(c.args) == 1:
+                    self.key_function(k.value, c.args[0])   # tier S2c: min(it, key=k)
+                else:
+                    self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no {k.arg}= in an AOT "
+                                                                          "program yet")
+                continue
             self.rep.error(k.value, "aot/keyword", k.arg or "**", "keyword arguments are outside the first AOT step")
         if any(isinstance(a, ast.Starred) for a in c.args):
             self.rep.error(c, "aot/keyword", "*", "a starred argument is outside the first AOT step")
@@ -723,6 +786,15 @@ class _Checker:
             elif n == "abs":
                 if len(c.args) != 1:
                     self.rep.error(c, "aot/call", n, "abs() takes one argument")
+            elif n in ("min", "max") and len(c.args) == 1 and isinstance(c.args[0], ast.GeneratorExp):
+                self.reduced_generators.add(id(c.args[0]))    # tier S2c: the loop the generator means (leader 2026-11-28)
+                self.expr(c.args[0])
+                return
+            elif n in ("min", "max") and len(c.args) == 1:
+                # tier S2c: of an iterable (typedpython/comprehensions.py; the front end checks the place)
+                self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
+                                                        body=[], orelse=[]), c))
+                return
             elif n in ("min", "max"):
                 if len(c.args) != 2:
                     self.rep.error(c, "aot/call", n, f"{n}() of other than two arguments is outside the AOT mode")
@@ -764,6 +836,14 @@ class _Checker:
                     for x in c.args[0].elts:
                         self.expr(x)
                 return                      # tier S2b: an empty set, a copy (the front end checks the argument)
+            elif n == "bytes":
+                for a in c.args:            # tier S2c: bytes(), bytes(n), bytes(xs) (the front end checks the argument)
+                    if isinstance(a, ast.List):
+                        for x in a.elts:
+                            self.expr(x)
+                    elif not (isinstance(a, ast.Name) and a.id in self.p.consts) and not isinstance(a, ast.Name):
+                        self.expr(a)
+                return
             elif n == "dict":
                 if not (len(c.args) == 1 and isinstance(c.args[0], ast.Name) and not c.keywords):
                     self.rep.error(c, "aot/builtin", n, "`dict()` is only supported as `dict(d)` of a dict in the AOT "
@@ -773,6 +853,20 @@ class _Checker:
                 self.rep.error(c, "aot/print-use", "print", "print is only supported as a statement of its own")
             elif n == "range":
                 self.rep.error(c, "aot/call", "range", "range is only supported as the iterable of a `for` loop")
+            elif n in ("sum", "any", "all", "sorted"):
+                # tier S2c: the loop over the iterable (typedpython/comprehensions.py; the front end checks the place)
+                if not c.args:
+                    self.rep.error(c, "aot/call", n, f"{n}() takes an iterable")
+                    return
+                if not isinstance(c.args[0], ast.GeneratorExp):
+                    self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
+                                                            body=[], orelse=[]), c))
+                else:
+                    self.reduced_generators.add(id(c.args[0]))  # tier S2c: the loop it means (leader 2026-11-28)
+                    self.expr(c.args[0])
+                for a in c.args[1:]:
+                    self.expr(a)
+                return
             elif hasattr(builtins, n) or n not in self.consts:
                 self.rep.error(f, "aot/builtin", n, f"the call of `{n}` is not provided in the first AOT step "
                                "(the program's functions, float, math functions and print)")
@@ -810,6 +904,13 @@ class _Checker:
               and f.value.id in self.var_classes
               and f.attr in self.class_methods.get(self.var_classes[f.value.id], ())):
             pass
+        elif isinstance(f, ast.Attribute) and f.attr in ("encode", "decode") and not (
+                isinstance(f.value, ast.Name) and f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
+            if not isinstance(f.value, ast.Name):
+                self.expr(f.value)          # tier S2c: str.encode() / bytes.decode() (the front end checks the rest)
+            for a in c.args:
+                self.expr(a)
+            return
         elif isinstance(f, ast.Attribute) and f.attr in frontend.STR_METHODS and not (
                 isinstance(f.value, ast.Name) and f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
             if not isinstance(f.value, ast.Name):
@@ -874,7 +975,8 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 
 
 # tier S2a: the methods of a list (design 4.3.2)
-LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
+LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count",
+                          "sort"})                              # (sort: tier S2c)
 # tier S2b: the dict methods (the front end checks the receiver is a dict)
 DICT_METHODS = frozenset({"get", "setdefault", "pop", "popitem", "keys", "values", "items", "copy", "clear", "update",
                           # (tier S2b: the set methods; the front end checks the receiver)
