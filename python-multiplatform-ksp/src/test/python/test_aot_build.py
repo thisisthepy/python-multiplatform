@@ -2530,7 +2530,7 @@ REJECTED = {
                                ("aot/type", 1, "tuple[list[float], int]")),
     # the constructs the AOT mode does not have yet, each named
     "list in a list": ("def f() -> int:\n    x = [[1.0]]\n    return 0\n", ("aot/front-end", 2, "f")),
-    "list method": ("def f(a: list[float]) -> None:\n    a.sort(key=abs)\n", ("aot/keyword", 2, "key")),   # (sort: S2c, no key yet)
+    "list method": ("def f(a: list[float]) -> None:\n    a.sort(cmp=abs)\n", ("aot/keyword", 2, "cmp")),   # (sort: S2c, no cmp=)
     "list comparison": ("def f(a: list[float], b: list[float]) -> bool:\n    return a == b\n", ("aot/front-end", 2, "f")),
     "list module constant": ("A = [1.0]\n", ("aot/constant", 1, "A")),
     "list passed as an expression": (

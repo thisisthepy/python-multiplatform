@@ -531,7 +531,7 @@ def test_non_class_attribute_and_method_rejected_when_class_exists(tmp_path: Pat
                     self.v = v
 
             def f(xs: list[float]) -> None:
-                xs.sort(key=abs)                # (append is tier S2a; sort is S2c, without a key yet)
+                xs.sort(cmp=abs)                # (append is tier S2a; sort is S2c, which takes no cmp=)
 
             if __name__ == "__main__":
                 xs: list[float] = [1.0]
