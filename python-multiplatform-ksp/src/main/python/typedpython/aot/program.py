@@ -40,7 +40,8 @@ LIST_ELEMENTS = ("int", "float")             # `list[int]` and `list[float]` are
 # builtin names a program must not rebind: the AOT mode compiles a call of each of these as the builtin
 BUILTINS_USED = frozenset({"print", "float", "range", "len", "abs", "min", "max", "int", "bool", "list",
                            "str", "repr", "ord", "chr",        # (str ... chr: tier S1)
-                           "enumerate", "zip", "reversed"})     # (tier S2c: the iterable of a loop)
+                           "enumerate", "zip", "reversed",      # (tier S2c: the iterable of a loop)
+                           "sum", "any", "all", "sorted"})      # (tier S2c: the loop over an iterable)
 RESERVED_PREFIX = "__tp_"
 MAIN = frontend.AOT_ENTRY
 
@@ -225,8 +226,8 @@ class _Checker:
         if ann is None:
             self.rep.error(node, "aot/annotation", what, f"{what} has no type annotation (a program is checked "
                            "by its annotations)")
-        elif isinstance(ann, ast.Name) and (ann.id in SCALAR_NAMES or ann.id == "str"):     # str: tier S1
-            return
+        elif isinstance(ann, ast.Name) and (ann.id in SCALAR_NAMES or ann.id in ("str", "bytes")):
+            return                          # (str: tier S1; bytes: tier S2c)
         elif allow_none and isinstance(ann, ast.Constant) and ann.value is None:
             return
         elif _is_list_annotation(ann) or _is_str_list_annotation(ann) or _is_optional_str_annotation(ann):
@@ -572,8 +573,8 @@ class _Checker:
             if v is None:
                 return
             kind = type(v).__name__
-            if isinstance(v, str):
-                return                                              # tier S1
+            if isinstance(v, (str, bytes)):
+                return                                              # tier S1 (bytes: tier S2c)
             self.rep.error(e, "aot/literal", kind, f"a `{kind}` literal is outside the first AOT step")
         elif isinstance(e, ast.Name):
             if e.id in self.consts and e.id not in self.shadow:
@@ -696,6 +697,31 @@ class _Checker:
             if k.arg in str_kw:             # tier S1b: split(sep=, maxsplit=), replace(count=)
                 self.expr(k.value)
                 continue
+            if isinstance(f, ast.Name) and f.id == "sum" and k.arg == "start" and "sum" not in self.shadow:
+                self.expr(k.value)          # tier S2c: sum(xs, start=...)
+                continue
+            if ((isinstance(f, ast.Name) and f.id == "sorted" and "sorted" not in self.shadow)
+                    or (isinstance(f, ast.Attribute) and f.attr == "sort")) and k.arg in ("reverse", "key"):
+                if k.arg == "key":            # tier S2c: sorted() / list.sort() without a key yet
+                    self.rep.error(k.value, "aot/keyword", "key", "sorted() and list.sort() take no key= in an AOT "
+                                                                 "program yet")
+                else:
+                    self.expr(k.value)
+                continue
+            if isinstance(f, ast.Attribute) and f.attr in ("encode", "decode") and k.arg in ("encoding", "errors"):
+                if k.arg == "errors":         # tier S2c: strict UTF-8 only
+                    self.rep.error(k.value, "aot/keyword", "errors", f"{f.attr}() takes no errors= in an AOT program "
+                                                                     "(strict UTF-8)")
+                else:
+                    self.expr(k.value)        # (the front end checks it is "utf-8")
+                continue
+            if isinstance(f, ast.Name) and f.id in ("min", "max") and f.id not in self.shadow:
+                if k.arg == "default" and len(c.args) == 1:
+                    self.expr(k.value)        # tier S2c: min(it, default=d) (comprehensions.py checks d)
+                else:
+                    self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no {k.arg}= in an AOT "
+                                                                          "program yet")
+                continue
             self.rep.error(k.value, "aot/keyword", k.arg or "**", "keyword arguments are outside the first AOT step")
         if any(isinstance(a, ast.Starred) for a in c.args):
             self.rep.error(c, "aot/keyword", "*", "a starred argument is outside the first AOT step")
@@ -723,6 +749,11 @@ class _Checker:
             elif n == "abs":
                 if len(c.args) != 1:
                     self.rep.error(c, "aot/call", n, "abs() takes one argument")
+            elif n in ("min", "max") and len(c.args) == 1 and not isinstance(c.args[0], ast.GeneratorExp):
+                # tier S2c: of an iterable (typedpython/comprehensions.py; the front end checks the place)
+                self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
+                                                        body=[], orelse=[]), c))
+                return
             elif n in ("min", "max"):
                 if len(c.args) != 2:
                     self.rep.error(c, "aot/call", n, f"{n}() of other than two arguments is outside the AOT mode")
@@ -764,6 +795,14 @@ class _Checker:
                     for x in c.args[0].elts:
                         self.expr(x)
                 return                      # tier S2b: an empty set, a copy (the front end checks the argument)
+            elif n == "bytes":
+                for a in c.args:            # tier S2c: bytes(), bytes(n), bytes(xs) (the front end checks the argument)
+                    if isinstance(a, ast.List):
+                        for x in a.elts:
+                            self.expr(x)
+                    elif not (isinstance(a, ast.Name) and a.id in self.p.consts) and not isinstance(a, ast.Name):
+                        self.expr(a)
+                return
             elif n == "dict":
                 if not (len(c.args) == 1 and isinstance(c.args[0], ast.Name) and not c.keywords):
                     self.rep.error(c, "aot/builtin", n, "`dict()` is only supported as `dict(d)` of a dict in the AOT "
@@ -773,6 +812,19 @@ class _Checker:
                 self.rep.error(c, "aot/print-use", "print", "print is only supported as a statement of its own")
             elif n == "range":
                 self.rep.error(c, "aot/call", "range", "range is only supported as the iterable of a `for` loop")
+            elif n in ("sum", "any", "all", "sorted"):
+                # tier S2c: the loop over the iterable (typedpython/comprehensions.py; the front end checks the place)
+                if not c.args:
+                    self.rep.error(c, "aot/call", n, f"{n}() takes an iterable")
+                    return
+                if not isinstance(c.args[0], ast.GeneratorExp):
+                    self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
+                                                            body=[], orelse=[]), c))
+                else:
+                    self.expr(c.args[0])
+                for a in c.args[1:]:
+                    self.expr(a)
+                return
             elif hasattr(builtins, n) or n not in self.consts:
                 self.rep.error(f, "aot/builtin", n, f"the call of `{n}` is not provided in the first AOT step "
                                "(the program's functions, float, math functions and print)")
@@ -810,6 +862,13 @@ class _Checker:
               and f.value.id in self.var_classes
               and f.attr in self.class_methods.get(self.var_classes[f.value.id], ())):
             pass
+        elif isinstance(f, ast.Attribute) and f.attr in ("encode", "decode") and not (
+                isinstance(f.value, ast.Name) and f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
+            if not isinstance(f.value, ast.Name):
+                self.expr(f.value)          # tier S2c: str.encode() / bytes.decode() (the front end checks the rest)
+            for a in c.args:
+                self.expr(a)
+            return
         elif isinstance(f, ast.Attribute) and f.attr in frontend.STR_METHODS and not (
                 isinstance(f.value, ast.Name) and f.value.id in ("sys", "math", "time") and f.value.id not in self.shadow):
             if not isinstance(f.value, ast.Name):
@@ -874,7 +933,8 @@ def _is_list_annotation(ann: ast.expr) -> bool:
 
 
 # tier S2a: the methods of a list (design 4.3.2)
-LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count"})
+LIST_METHODS = frozenset({"append", "insert", "extend", "clear", "reverse", "remove", "pop", "index", "count",
+                          "sort"})                              # (sort: tier S2c)
 # tier S2b: the dict methods (the front end checks the receiver is a dict)
 DICT_METHODS = frozenset({"get", "setdefault", "pop", "popitem", "keys", "values", "items", "copy", "clear", "update",
                           # (tier S2b: the set methods; the front end checks the receiver)

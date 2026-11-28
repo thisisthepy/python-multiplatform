@@ -138,6 +138,7 @@ typedef int64_t tpa_rc_t;
 #define TPA_UnicodeEncodeError 7 /* tier S1: a lone surrogate written to standard output (tp_aot_str.h) */
 #define TPA_KeyError 8           /* tier S2b: a missing dict key (the message is the key's repr), an empty popitem */
 #define TPA_RuntimeError 9       /* tier S2b: a dict changed size during iteration (tp_aot_dict.h) */
+#define TPA_UnicodeDecodeError 10 /* tier S2c: bytes.decode() of bytes that are not UTF-8 (tp_aot_str.h) */
 
 typedef struct {
     int kind;
@@ -158,6 +159,7 @@ static inline const char *tpa_exc_name(int kind)
     case TPA_UnicodeEncodeError: return "UnicodeEncodeError";
     case TPA_KeyError: return "KeyError";
     case TPA_RuntimeError: return "RuntimeError";
+    case TPA_UnicodeDecodeError: return "UnicodeDecodeError";
     }
     return "SystemError";
 }
@@ -1521,6 +1523,559 @@ TPA__DEF_LIST_ALLOC_FIXED(i64, int64_t)
 TPA__DEF_LIST(f64, double)
 TPA__DEF_LIST(i64, int64_t)
 #undef TPA__DEF_LIST
+
+/* Tier S2c: list.sort() and sorted(), CPython's own listsort (Objects/listobject.c of CPython 3.15.0rc1, the embedded
+ * version: binarysort, count_run, gallop_left / gallop_right, merge_lo / merge_hi, merge_at, the powersort merge order
+ * of found_new_run and powerloop, merge_force_collapse, the minrun of each run from minrun_next (3.15; 3.14 computed one
+ * minrun for the whole list, which orders NaN differently), list_sort_impl), ported as it is for a list without a key
+ * function, so the order of equal and of unordered elements (NaN) is CPython's, not merely some stable order. Only
+ * `<` is used, as ISLT; the items are moved, never copied (a permutation: the references are unchanged). With no key
+ * every special-cased compare of CPython (unsafe_long_compare, unsafe_float_compare, unsafe_latin_compare) is the
+ * type's `<`, which LT is. A comparison cannot fail here, so the only error is MemoryError for the merge memory.
+ * TPA__DEF_SORT(NAME, T, LT) defines `NAME__listsort(T *items, int64_t n, int reverse)`: 0, or -1 with the error. */
+#define TPA_SORT_MIN_GALLOP 7
+#define TPA_SORT_TEMP_SIZE 256
+#define TPA_SORT_MAX_MINRUN 64
+#define TPA_SORT_MAX_PENDING 64
+#define TPA__DEF_SORT(NAME, T, LT)                                                                  \
+    typedef struct { T *base; int64_t len; int power; } NAME##__run;                                 \
+    typedef struct {                                                                                 \
+        int64_t min_gallop;                                                                          \
+        int64_t listlen;                                                                             \
+        T *basekeys;                                                                                 \
+        T *a;                                                                                        \
+        int64_t alloced;                                                                             \
+        int n;                                                                                       \
+        int64_t mr_current, mr_e, mr_mask;                                                           \
+        NAME##__run pending[TPA_SORT_MAX_PENDING];                                                   \
+        T temparray[TPA_SORT_TEMP_SIZE];                                                             \
+    } NAME##__ms;                                                                                    \
+    static TPA_UNUSED void NAME##__reverse(T *lo, T *hi)                                             \
+    {                                                                                                \
+        --hi;                                                                                        \
+        while (lo < hi) {                                                                            \
+            T t = *lo;                                                                               \
+            *lo = *hi;                                                                               \
+            *hi = t;                                                                                 \
+            ++lo;                                                                                    \
+            --hi;                                                                                    \
+        }                                                                                            \
+    }                                                                                                \
+    /* binarysort: a[:ok] is sorted; a stable binary insertion sort of a[:n] */                      \
+    static TPA_UNUSED void NAME##__binarysort(T *a, int64_t n, int64_t ok)                           \
+    {                                                                                                \
+        int64_t L, R, M;                                                                             \
+        T pivot;                                                                                     \
+        if (!ok)                                                                                     \
+            ++ok;                                                                                    \
+        for (; ok < n; ++ok) {                                                                       \
+            L = 0;                                                                                   \
+            R = ok;                                                                                  \
+            pivot = a[ok];                                                                           \
+            do {                                                                                     \
+                M = (L + R) >> 1;                                                                    \
+                if (LT(pivot, a[M]))                                                                 \
+                    R = M;                                                                           \
+                else                                                                                 \
+                    L = M + 1;                                                                       \
+            } while (L < R);                                                                         \
+            for (M = ok; M > L; --M)                                                                 \
+                a[M] = a[M - 1];                                                                     \
+            a[L] = pivot;                                                                            \
+        }                                                                                            \
+    }                                                                                                \
+    /* count_run: the length of the run at lo, made ascending in place (equal subruns of a           \
+     * descending run reversed on the fly, as REVERSE_LAST_NEQ does) */                              \
+    static TPA_UNUSED int64_t NAME##__count_run(T *lo, int64_t nremaining)                           \
+    {                                                                                                \
+        int64_t n, neq;                                                                              \
+        for (n = 1; n < nremaining; ++n) {                                                           \
+            if (LT(lo[n], lo[n - 1]))                                                                \
+                break;                                                                               \
+        }                                                                                            \
+        if (n == nremaining)                                                                         \
+            return n;                                                                                \
+        if (n > 1) {                                                                                 \
+            if (LT(lo[0], lo[n - 1]))                                                                \
+                return n;                                                                            \
+            NAME##__reverse(lo, lo + n);                                                             \
+        }                                                                                            \
+        ++n;                                                                                         \
+        neq = 0;                                                                                     \
+        for (; n < nremaining; ++n) {                                                                \
+            if (LT(lo[n], lo[n - 1])) {                                                              \
+                if (neq) {                                                                           \
+                    ++neq;                                                                           \
+                    NAME##__reverse(lo + (n - neq), lo + n);                                         \
+                    neq = 0;                                                                         \
+                }                                                                                    \
+            }                                                                                        \
+            else {                                                                                   \
+                if (LT(lo[n - 1], lo[n]))                                                            \
+                    break;                                                                           \
+                else                                                                                 \
+                    ++neq;                                                                           \
+            }                                                                                        \
+        }                                                                                            \
+        if (neq) {                                                                                   \
+            ++neq;                                                                                   \
+            NAME##__reverse(lo + (n - neq), lo + n);                                                 \
+            neq = 0;                                                                                 \
+        }                                                                                            \
+        NAME##__reverse(lo, lo + n);                                                                 \
+        for (; n < nremaining; ++n) {                                                                \
+            if (LT(lo[n], lo[n - 1]))                                                                \
+                break;                                                                               \
+        }                                                                                            \
+        return n;                                                                                    \
+    }                                                                                                \
+    /* gallop_left: k with a[k-1] < key <= a[k] */                                                   \
+    static TPA_UNUSED int64_t NAME##__gallop_left(T key, T *a, int64_t n, int64_t hint)              \
+    {                                                                                                \
+        int64_t ofs, lastofs, k;                                                                     \
+        a += hint;                                                                                   \
+        lastofs = 0;                                                                                 \
+        ofs = 1;                                                                                     \
+        if (LT(*a, key)) {                                                                           \
+            const int64_t maxofs = n - hint;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(a[ofs], key)) {                                                               \
+                    lastofs = ofs;                                                                   \
+                    ofs = (ofs << 1) + 1;                                                            \
+                }                                                                                    \
+                else                                                                                 \
+                    break;                                                                           \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            lastofs += hint;                                                                         \
+            ofs += hint;                                                                             \
+        }                                                                                            \
+        else {                                                                                       \
+            const int64_t maxofs = hint + 1;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(*(a - ofs), key))                                                             \
+                    break;                                                                           \
+                lastofs = ofs;                                                                       \
+                ofs = (ofs << 1) + 1;                                                                \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            k = lastofs;                                                                             \
+            lastofs = hint - ofs;                                                                    \
+            ofs = hint - k;                                                                          \
+        }                                                                                            \
+        a -= hint;                                                                                   \
+        ++lastofs;                                                                                   \
+        while (lastofs < ofs) {                                                                      \
+            int64_t m = lastofs + ((ofs - lastofs) >> 1);                                            \
+            if (LT(a[m], key))                                                                       \
+                lastofs = m + 1;                                                                     \
+            else                                                                                     \
+                ofs = m;                                                                             \
+        }                                                                                            \
+        return ofs;                                                                                  \
+    }                                                                                                \
+    /* gallop_right: k with a[k-1] <= key < a[k] */                                                  \
+    static TPA_UNUSED int64_t NAME##__gallop_right(T key, T *a, int64_t n, int64_t hint)             \
+    {                                                                                                \
+        int64_t ofs, lastofs, k;                                                                     \
+        a += hint;                                                                                   \
+        lastofs = 0;                                                                                 \
+        ofs = 1;                                                                                     \
+        if (LT(key, *a)) {                                                                           \
+            const int64_t maxofs = hint + 1;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(key, *(a - ofs))) {                                                           \
+                    lastofs = ofs;                                                                   \
+                    ofs = (ofs << 1) + 1;                                                            \
+                }                                                                                    \
+                else                                                                                 \
+                    break;                                                                           \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            k = lastofs;                                                                             \
+            lastofs = hint - ofs;                                                                    \
+            ofs = hint - k;                                                                          \
+        }                                                                                            \
+        else {                                                                                       \
+            const int64_t maxofs = n - hint;                                                         \
+            while (ofs < maxofs) {                                                                   \
+                if (LT(key, a[ofs]))                                                                 \
+                    break;                                                                           \
+                lastofs = ofs;                                                                       \
+                ofs = (ofs << 1) + 1;                                                                \
+            }                                                                                        \
+            if (ofs > maxofs)                                                                        \
+                ofs = maxofs;                                                                        \
+            lastofs += hint;                                                                         \
+            ofs += hint;                                                                             \
+        }                                                                                            \
+        a -= hint;                                                                                   \
+        ++lastofs;                                                                                   \
+        while (lastofs < ofs) {                                                                      \
+            int64_t m = lastofs + ((ofs - lastofs) >> 1);                                            \
+            if (LT(key, a[m]))                                                                       \
+                ofs = m;                                                                             \
+            else                                                                                     \
+                lastofs = m + 1;                                                                     \
+        }                                                                                            \
+        return ofs;                                                                                  \
+    }                                                                                                \
+    static TPA_UNUSED void NAME##__freemem(NAME##__ms *ms)                                           \
+    {                                                                                                \
+        if (ms->a != ms->temparray) {                                                                \
+            free(ms->a);                                                                             \
+            ms->a = NULL;                                                                            \
+        }                                                                                            \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__getmem(NAME##__ms *ms, int64_t need)                               \
+    {                                                                                                \
+        if (need <= ms->alloced)                                                                     \
+            return 0;                                                                                \
+        NAME##__freemem(ms);                                                                         \
+        if ((uint64_t)need > (uint64_t)INT64_MAX / sizeof(T)) {                                      \
+            ms->a = ms->temparray;                                                                   \
+            ms->alloced = TPA_SORT_TEMP_SIZE;                                                        \
+            return tpa_raise(TPA_MemoryError, "");                                                   \
+        }                                                                                            \
+        ms->a = (T *)malloc((size_t)need * sizeof(T));                                               \
+        if (ms->a != NULL) {                                                                         \
+            ms->alloced = need;                                                                      \
+            return 0;                                                                                \
+        }                                                                                            \
+        ms->a = ms->temparray;                                                                       \
+        ms->alloced = TPA_SORT_TEMP_SIZE;                                                            \
+        return tpa_raise(TPA_MemoryError, "");                                                       \
+    }                                                                                                \
+    /* merge_lo: merge a[:na] and b[:nb] (b = a + na) in place, na <= nb */                          \
+    static TPA_UNUSED int NAME##__merge_lo(NAME##__ms *ms, T *ssa, int64_t na, T *ssb, int64_t nb)   \
+    {                                                                                                \
+        int64_t k, min_gallop;                                                                       \
+        T *dest;                                                                                     \
+        int result = -1;                                                                             \
+        if (NAME##__getmem(ms, na) < 0)                                                              \
+            return -1;                                                                               \
+        memcpy(ms->a, ssa, (size_t)na * sizeof(T));                                                  \
+        dest = ssa;                                                                                  \
+        ssa = ms->a;                                                                                 \
+        *dest++ = *ssb++;                                                                            \
+        --nb;                                                                                        \
+        if (nb == 0)                                                                                 \
+            goto Succeed;                                                                            \
+        if (na == 1)                                                                                 \
+            goto CopyB;                                                                              \
+        min_gallop = ms->min_gallop;                                                                 \
+        for (;;) {                                                                                   \
+            int64_t acount = 0, bcount = 0;                                                          \
+            for (;;) {                                                                               \
+                if (LT(ssb[0], ssa[0])) {                                                            \
+                    *dest++ = *ssb++;                                                                \
+                    ++bcount;                                                                        \
+                    acount = 0;                                                                      \
+                    --nb;                                                                            \
+                    if (nb == 0)                                                                     \
+                        goto Succeed;                                                                \
+                    if (bcount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+                else {                                                                               \
+                    *dest++ = *ssa++;                                                                \
+                    ++acount;                                                                        \
+                    bcount = 0;                                                                      \
+                    --na;                                                                            \
+                    if (na == 1)                                                                     \
+                        goto CopyB;                                                                  \
+                    if (acount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+            }                                                                                        \
+            ++min_gallop;                                                                            \
+            do {                                                                                     \
+                min_gallop -= min_gallop > 1;                                                        \
+                ms->min_gallop = min_gallop;                                                         \
+                k = NAME##__gallop_right(ssb[0], ssa, na, 0);                                        \
+                acount = k;                                                                          \
+                if (k) {                                                                             \
+                    memcpy(dest, ssa, (size_t)k * sizeof(T));                                        \
+                    dest += k;                                                                       \
+                    ssa += k;                                                                        \
+                    na -= k;                                                                         \
+                    if (na == 1)                                                                     \
+                        goto CopyB;                                                                  \
+                    if (na == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest++ = *ssb++;                                                                    \
+                --nb;                                                                                \
+                if (nb == 0)                                                                         \
+                    goto Succeed;                                                                    \
+                k = NAME##__gallop_left(ssa[0], ssb, nb, 0);                                         \
+                bcount = k;                                                                          \
+                if (k) {                                                                             \
+                    memmove(dest, ssb, (size_t)k * sizeof(T));                                       \
+                    dest += k;                                                                       \
+                    ssb += k;                                                                        \
+                    nb -= k;                                                                         \
+                    if (nb == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest++ = *ssa++;                                                                    \
+                --na;                                                                                \
+                if (na == 1)                                                                         \
+                    goto CopyB;                                                                      \
+            } while (acount >= TPA_SORT_MIN_GALLOP || bcount >= TPA_SORT_MIN_GALLOP);                \
+            ++min_gallop;                                                                            \
+            ms->min_gallop = min_gallop;                                                             \
+        }                                                                                            \
+    Succeed:                                                                                         \
+        result = 0;                                                                                  \
+        if (na)                                                                                      \
+            memcpy(dest, ssa, (size_t)na * sizeof(T));                                               \
+        return result;                                                                               \
+    CopyB:                                                                                           \
+        memmove(dest, ssb, (size_t)nb * sizeof(T));                                                  \
+        dest[nb] = ssa[0];                                                                           \
+        return 0;                                                                                    \
+    }                                                                                                \
+    /* merge_hi: merge a[:na] and b[:nb] (b = a + na) in place, na >= nb */                          \
+    static TPA_UNUSED int NAME##__merge_hi(NAME##__ms *ms, T *ssa, int64_t na, T *ssb, int64_t nb)   \
+    {                                                                                                \
+        int64_t k, min_gallop;                                                                       \
+        T *dest;                                                                                     \
+        T *basea;                                                                                    \
+        T *baseb;                                                                                    \
+        int result = -1;                                                                             \
+        if (NAME##__getmem(ms, nb) < 0)                                                              \
+            return -1;                                                                               \
+        dest = ssb + (nb - 1);                                                                       \
+        memcpy(ms->a, ssb, (size_t)nb * sizeof(T));                                                  \
+        basea = ssa;                                                                                 \
+        baseb = ms->a;                                                                               \
+        ssb = ms->a + nb - 1;                                                                        \
+        ssa += na - 1;                                                                               \
+        *dest-- = *ssa--;                                                                            \
+        --na;                                                                                        \
+        if (na == 0)                                                                                 \
+            goto Succeed;                                                                            \
+        if (nb == 1)                                                                                 \
+            goto CopyA;                                                                              \
+        min_gallop = ms->min_gallop;                                                                 \
+        for (;;) {                                                                                   \
+            int64_t acount = 0, bcount = 0;                                                          \
+            for (;;) {                                                                               \
+                if (LT(ssb[0], ssa[0])) {                                                            \
+                    *dest-- = *ssa--;                                                                \
+                    ++acount;                                                                        \
+                    bcount = 0;                                                                      \
+                    --na;                                                                            \
+                    if (na == 0)                                                                     \
+                        goto Succeed;                                                                \
+                    if (acount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+                else {                                                                               \
+                    *dest-- = *ssb--;                                                                \
+                    ++bcount;                                                                        \
+                    acount = 0;                                                                      \
+                    --nb;                                                                            \
+                    if (nb == 1)                                                                     \
+                        goto CopyA;                                                                  \
+                    if (bcount >= min_gallop)                                                        \
+                        break;                                                                       \
+                }                                                                                    \
+            }                                                                                        \
+            ++min_gallop;                                                                            \
+            do {                                                                                     \
+                min_gallop -= min_gallop > 1;                                                        \
+                ms->min_gallop = min_gallop;                                                         \
+                k = NAME##__gallop_right(ssb[0], basea, na, na - 1);                                 \
+                k = na - k;                                                                          \
+                acount = k;                                                                          \
+                if (k) {                                                                             \
+                    dest -= k;                                                                       \
+                    ssa -= k;                                                                        \
+                    memmove(dest + 1, ssa + 1, (size_t)k * sizeof(T));                               \
+                    na -= k;                                                                         \
+                    if (na == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest-- = *ssb--;                                                                    \
+                --nb;                                                                                \
+                if (nb == 1)                                                                         \
+                    goto CopyA;                                                                      \
+                k = NAME##__gallop_left(ssa[0], baseb, nb, nb - 1);                                  \
+                k = nb - k;                                                                          \
+                bcount = k;                                                                          \
+                if (k) {                                                                             \
+                    dest -= k;                                                                       \
+                    ssb -= k;                                                                        \
+                    memcpy(dest + 1, ssb + 1, (size_t)k * sizeof(T));                                \
+                    nb -= k;                                                                         \
+                    if (nb == 1)                                                                     \
+                        goto CopyA;                                                                  \
+                    if (nb == 0)                                                                     \
+                        goto Succeed;                                                                \
+                }                                                                                    \
+                *dest-- = *ssa--;                                                                    \
+                --na;                                                                                \
+                if (na == 0)                                                                         \
+                    goto Succeed;                                                                    \
+            } while (acount >= TPA_SORT_MIN_GALLOP || bcount >= TPA_SORT_MIN_GALLOP);                \
+            ++min_gallop;                                                                            \
+            ms->min_gallop = min_gallop;                                                             \
+        }                                                                                            \
+    Succeed:                                                                                         \
+        result = 0;                                                                                  \
+        if (nb)                                                                                      \
+            memcpy(dest - (nb - 1), baseb, (size_t)nb * sizeof(T));                                  \
+        return result;                                                                               \
+    CopyA:                                                                                           \
+        memmove(dest + 1 - na, ssa + 1 - na, (size_t)na * sizeof(T));                                \
+        dest -= na;                                                                                  \
+        ssa -= na;                                                                                   \
+        dest[0] = ssb[0];                                                                            \
+        return 0;                                                                                    \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__merge_at(NAME##__ms *ms, int64_t i)                                \
+    {                                                                                                \
+        T *ssa = ms->pending[i].base;                                                                \
+        T *ssb = ms->pending[i + 1].base;                                                            \
+        int64_t na = ms->pending[i].len, nb = ms->pending[i + 1].len, k;                             \
+        ms->pending[i].len = na + nb;                                                                \
+        if (i == ms->n - 3)                                                                          \
+            ms->pending[i + 1] = ms->pending[i + 2];                                                 \
+        --ms->n;                                                                                     \
+        k = NAME##__gallop_right(*ssb, ssa, na, 0);                                                  \
+        ssa += k;                                                                                    \
+        na -= k;                                                                                     \
+        if (na == 0)                                                                                 \
+            return 0;                                                                                \
+        nb = NAME##__gallop_left(ssa[na - 1], ssb, nb, nb - 1);                                      \
+        if (nb <= 0)                                                                                 \
+            return (int)nb;                                                                          \
+        if (na <= nb)                                                                                \
+            return NAME##__merge_lo(ms, ssa, na, ssb, nb);                                           \
+        else                                                                                         \
+            return NAME##__merge_hi(ms, ssa, na, ssb, nb);                                           \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__powerloop(int64_t s1, int64_t n1, int64_t n2, int64_t n)           \
+    {                                                                                                \
+        int result = 0;                                                                              \
+        int64_t a = 2 * s1 + n1;                                                                     \
+        int64_t b = a + n1 + n2;                                                                     \
+        for (;;) {                                                                                   \
+            ++result;                                                                                \
+            if (a >= n) {                                                                            \
+                a -= n;                                                                              \
+                b -= n;                                                                              \
+            }                                                                                        \
+            else if (b >= n) {                                                                       \
+                break;                                                                               \
+            }                                                                                        \
+            a <<= 1;                                                                                 \
+            b <<= 1;                                                                                 \
+        }                                                                                            \
+        return result;                                                                               \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__found_new_run(NAME##__ms *ms, int64_t n2)                          \
+    {                                                                                                \
+        if (ms->n) {                                                                                 \
+            NAME##__run *p = ms->pending;                                                            \
+            int64_t s1 = p[ms->n - 1].base - ms->basekeys;                                           \
+            int64_t n1 = p[ms->n - 1].len;                                                           \
+            int power = NAME##__powerloop(s1, n1, n2, ms->listlen);                                  \
+            while (ms->n > 1 && p[ms->n - 2].power > power) {                                        \
+                if (NAME##__merge_at(ms, ms->n - 2) < 0)                                             \
+                    return -1;                                                                       \
+            }                                                                                        \
+            p[ms->n - 1].power = power;                                                              \
+        }                                                                                            \
+        return 0;                                                                                    \
+    }                                                                                                \
+    static TPA_UNUSED int NAME##__force_collapse(NAME##__ms *ms)                                     \
+    {                                                                                                \
+        NAME##__run *p = ms->pending;                                                                \
+        while (ms->n > 1) {                                                                          \
+            int64_t n = ms->n - 2;                                                                   \
+            if (n > 0 && p[n - 1].len < p[n + 1].len)                                                \
+                --n;                                                                                 \
+            if (NAME##__merge_at(ms, n) < 0)                                                         \
+                return -1;                                                                           \
+        }                                                                                            \
+        return 0;                                                                                    \
+    }                                                                                                \
+    /* minrun_next: the next minrun, listlen / 2**e in infinite precision spread over the runs */      \
+    static TPA_UNUSED int64_t NAME##__minrun_next(NAME##__ms *ms)                                    \
+    {                                                                                                \
+        int64_t result;                                                                              \
+        ms->mr_current += ms->listlen;                                                               \
+        result = ms->mr_current >> ms->mr_e;                                                         \
+        ms->mr_current &= ms->mr_mask;                                                               \
+        return result;                                                                               \
+    }                                                                                                \
+    /* list_sort_impl without a key: reversed first and last for reverse=True (stability) */         \
+    static TPA_UNUSED int NAME##__listsort(T *items, int64_t size, int reverse)                      \
+    {                                                                                                \
+        NAME##__ms ms;                                                                               \
+        int64_t nremaining, minrun;                                                                  \
+        T *lo = items;                                                                               \
+        int rc = -1;                                                                                 \
+        ms.alloced = TPA_SORT_TEMP_SIZE;                                                             \
+        ms.a = ms.temparray;                                                                         \
+        ms.n = 0;                                                                                    \
+        ms.min_gallop = TPA_SORT_MIN_GALLOP;                                                         \
+        ms.listlen = size;                                                                           \
+        ms.basekeys = items;                                                                         \
+        ms.mr_e = 0;                                                                                 \
+        while (size >> ms.mr_e >= TPA_SORT_MAX_MINRUN)                                               \
+            ++ms.mr_e;                                                                               \
+        ms.mr_mask = ((int64_t)1 << ms.mr_e) - 1;                                                    \
+        ms.mr_current = 0;                                                                           \
+        nremaining = size;                                                                           \
+        if (nremaining < 2)                                                                          \
+            return 0;                                                                                \
+        if (reverse)                                                                                 \
+            NAME##__reverse(items, items + size);                                                    \
+        do {                                                                                         \
+            int64_t n;                                                                               \
+            minrun = NAME##__minrun_next(&ms);                                                       \
+            n = NAME##__count_run(lo, nremaining);                                                   \
+            if (n < minrun) {                                                                        \
+                const int64_t force = nremaining <= minrun ? nremaining : minrun;                    \
+                NAME##__binarysort(lo, force, n);                                                    \
+                n = force;                                                                           \
+            }                                                                                        \
+            if (NAME##__found_new_run(&ms, n) < 0)                                                   \
+                goto fail;                                                                           \
+            ms.pending[ms.n].base = lo;                                                              \
+            ms.pending[ms.n].len = n;                                                                \
+            ++ms.n;                                                                                  \
+            lo += n;                                                                                 \
+            nremaining -= n;                                                                         \
+        } while (nremaining);                                                                        \
+        if (NAME##__force_collapse(&ms) < 0)                                                         \
+            goto fail;                                                                               \
+        rc = 0;                                                                                      \
+    fail:                                                                                            \
+        if (reverse)                                                                                 \
+            NAME##__reverse(items, items + size);                                                    \
+        NAME##__freemem(&ms);                                                                        \
+        return rc;                                                                                   \
+    }
+#define TPA__LT_NUM(a, b) ((a) < (b))
+TPA__DEF_SORT(tpa_sort_i64, int64_t, TPA__LT_NUM)
+TPA__DEF_SORT(tpa_sort_f64, double, TPA__LT_NUM)
+/* list.sort() of a list[int] of the RAW kind and of a list[float] */
+static inline TPA_UNUSED int tpa_i64_sort(tpa_i64_list *l, int reverse)
+{
+    return tpa_sort_i64__listsort(l->d, l->len, reverse);
+}
+static inline TPA_UNUSED int tpa_f64_sort(tpa_f64_list *l, int reverse)
+{
+    return tpa_sort_f64__listsort(l->d, l->len, reverse);
+}
 
 /* Tier S2a: searching a list[int] of the RAW kind (a list of float is never searched: NaN's identity, design 4.3.2).
  * list.index(v): the first position, else ValueError("list.index(x): x not in list") (Objects/listobject.c

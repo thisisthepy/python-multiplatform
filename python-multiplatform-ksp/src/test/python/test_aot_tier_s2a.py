@@ -1592,7 +1592,8 @@ TUPLE_MAIN = '\n\ndef main() -> None:\n    print(f(1))\n\n\nif __name__ == "__ma
     ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, i + 1))\n", "bind the values to names first"),
     ("def f(i: int) -> int:\n    ps = [(i, 1)]\n    return ps.count((i, 1)) + f(i - 1)\n", "bind the call's value"),
     ("def f(i: int) -> bool:\n    ps = [(i, 1)]\n    qs = [(i, 'a')]\n    return ps == qs\n", "of its shape"),
-    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    ps.sort()\n    return 0\n", "`ps.sort` is outside"),
+    # (tier S2c sorts a list of int, float or str; a list of tuples is not sorted yet)
+    ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    ps.sort()\n    return 0\n", "sorting one and returning one"),
     ("def f(i: int) -> int:\n    ps: list[tuple[int, bool]] = []\n    return 0\n", "no list of bool yet"),
     ("def f(i: int) -> int:\n    ps = [(i, 'a')]\n    print(ps, f(i - 1))\n    return 0\n", "bind the call's value"),
 ])

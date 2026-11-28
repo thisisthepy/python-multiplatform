@@ -2600,6 +2600,14 @@ static TPA_UNUSED void tpa_int_list_reverse(tpa_int_list *l)
     }
 }
 
+/* Tier S2c: list.sort() of a big-capable list[int], CPython's listsort (TPA__DEF_SORT in tp_aot.h) by tpa_int_cmp */
+#define TPA__LT_INT(a, b) (tpa_int_cmp((a), (b)) < 0)
+TPA__DEF_SORT(tpa_sort_int, tpa_int, TPA__LT_INT)
+static TPA_UNUSED int tpa_int_list_sort(tpa_int_list *l, int reverse)
+{
+    return tpa_sort_int__listsort(l->d, l->len, reverse);
+}
+
 /* list.pop: the element's reference moves to `*out` (which gives up the one it held) */
 static TPA_UNUSED int tpa_int_list_pop(tpa_int_list *l, int has_index, int64_t i, tpa_int *out)
 {
