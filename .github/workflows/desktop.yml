@@ -7,21 +7,34 @@ on:
 
 jobs:
   test:
-    name: Desktop Tests
-    # macOS runner is used to compile for iOS and is also good for Desktop.
-    # We use ubuntu, macos, and windows to cover the major desktop platforms.
+    name: Desktop Tests (${{ matrix.os }})
+    # The desktop (JVM) library ships for macOS, Linux and Windows, so its suite runs on all three
+    # (#551, SPEC P-2; leader decision (a), 2026-11-27). Until then it ran on macOS only and the
+    # Linux and Windows desktop had never been observed. fail-fast is off so one OS's failure does
+    # not hide the others' results.
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        # Git Bash on Windows, so `./gradlew` is the same script on every OS.
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # JDK 17 as well: the compiler plugin and KSP compile with a languageVersion=17 toolchain, and
+      # Gradle's auto-detection does not find the runner's preinstalled 17 on Windows (batch runs
+      # 44945907475 and 45973628546). setup-java exports JAVA_HOME_17_X64; the Gradle step names it
+      # on Windows. 21, listed last, stays the default.
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: |
+            17
+            21
           distribution: 'zulu'
           # This automatically caches ~/.gradle/caches and ~/.gradle/wrapper
           cache: 'gradle'
@@ -38,17 +51,29 @@ jobs:
       # The dev agent's protocol (SPEC L-12, #233): stdlib-only, so the runner's own python3 runs it.
       - name: Dev agent protocol tests
         working-directory: python-multiplatform/src/test/python
-        run: python3 -m unittest -v test_devagent
+        # Windows runners name the interpreter `python`.
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} -m unittest -v test_devagent
 
       - name: Run Desktop Tests
         # Using --console=plain so logs are readable in GitHub Actions
-        run: ./gradlew :python-multiplatform:desktopTest --console=plain
+        run: ./gradlew :python-multiplatform:desktopTest --console=plain ${{ runner.os == 'Windows' && '-Porg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64' || '' }}
+
+      - name: Upload the desktop test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-test-reports-${{ matrix.os }}
+          path: |
+            python-multiplatform/build/reports/tests/desktopTest
+            python-multiplatform/build/test-results/desktopTest
 
       # The shared desktop native source set (macosArm64, linuxX64, mingwX64) compiles against the
       # commonized cinterop bindings only here and in publishing; the per-target compiles above do
       # not. Without this step a binding the commonizer drops (one that takes `wchar_t`, #521)
       # broke publishToMavenLocal for toolchain's CI while every job here stayed green.
       - name: Compile the desktop native shared source set (metadata)
+        # Commonizing needs the macosArm64 cinterop, which only a macOS host can run.
+        if: runner.os == 'macOS'
         run: ./gradlew :python-multiplatform:compileDesktopNativeMainKotlinMetadata --rerun --console=plain
 
   artifact-fixture:

@@ -195,6 +195,35 @@ val extractedDir = file("$downloadDir/extracted/$configuredPythonVersion")
 val desktopFlavourSuffix = "-freethreaded"
 
 /**
+ * Repairs the shared-library symlink stubs `tarTree` leaves in an extracted desktop prefix (#551).
+ *
+ * python-build-standalone ships `lib/libpython3.15t.so -> libpython3.15t.so.1.0`, and Gradle's
+ * `tarTree` extracts that link as a 0-byte regular file. The jar never noticed (stageDesktopLibraries
+ * drops the stub and renames the real file), but this prefix is also desktopTest's PYTHONHOME, and a
+ * test that loads libpython out of the prefix the way a packaged app does (SPEC L-9,
+ * PackagedPythonHomeLaunchTest) failed on Linux with "file too short" (batch run 45973628546). The
+ * plugin's own staging already materialises links (PythonHomeStaging.extractTarGzMaterialisingLinks);
+ * this does the same for the library's extraction. A relative symlink where the host allows one, a
+ * copy otherwise. Idempotent, so it also repairs a prefix extracted before this existed.
+ */
+fun materialiseLibraryStubs(extracted: File) {
+    val versioned = Regex("""^(lib.+\.so)(\.\d+)+$""")
+    extracted.walkTopDown()
+        .filter { it.isFile && versioned.matches(it.name) }
+        .forEach { real ->
+            val stub = File(real.parentFile, versioned.find(real.name)!!.groupValues[1])
+            val stubPath = stub.toPath()
+            if (Files.isSymbolicLink(stubPath) || !stub.exists() || stub.length() != 0L) return@forEach
+            stub.delete()
+            try {
+                Files.createSymbolicLink(stubPath, Path.of(real.name))
+            } catch (_: Exception) {
+                real.copyTo(stub, overwrite = true)
+            }
+        }
+}
+
+/**
  * Fails the build when the extracted CPython's own headers report a version other than
  * `pythonVersion` (issue #47). The archive name and the lockfile say what was meant to be
  * downloaded; `PY_VERSION` in `patchlevel.h` says what it is. iOS once shipped 3.14.6 (BeeWare
@@ -545,6 +574,7 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
                     into(extractDir)
                 }
             }
+            materialiseLibraryStubs(extractDir)
             requireHeaderVersion(platform, extractDir)
         }
     }
@@ -1234,6 +1264,9 @@ kotlin {
                     if (file.length() == 0L) { exclude(); return@eachFile }
                     val platform = relativePath.segments[0].removeSuffix(desktopFlavourSuffix)
                     val filename = name.replace(Regex("""(\.so)(\.\d+)+$"""), "$1")
+                    // materialiseLibraryStubs made `libX.so` a real library (a link or a copy), so
+                    // `libX.so.1.0` would land on the same path a second time.
+                    if (filename != name && File(file.parentFile, filename).length() > 0L) { exclude(); return@eachFile }
                     path = "lib/$platform/$filename"
                 }
                 includeEmptyDirs = false
