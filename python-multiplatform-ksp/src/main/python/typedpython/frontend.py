@@ -1962,6 +1962,9 @@ class _Lowerer:
                 return []  # a docstring or a bare literal: no effect
             if self.info.aot and _is_print_call(node.value) and self.builtin("print"):
                 return self.print_stmt(node.value)
+            if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) \
+                    and node.value.func.id == comprehensions.KEYSORT:
+                return self.keyed_sort_stmt(node.value)                 # tier S2c: the marker comprehensions.py wrote
             if self.info.aot and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) \
                     and node.value.func.attr == "sort" and isinstance(node.value.func.value, ast.Name) \
                     and self.is_list_name(node.value.func.value.id):
@@ -3602,6 +3605,28 @@ class _Lowerer:
         self.hoist_ok = False
         self.list_effect(array)
         return self.take() + [ir.ListSort(array, reverse)]
+
+    def keyed_sort_stmt(self, node: ast.Call) -> list[ir.Stmt]:
+        """`KEYSORT(keys, reverse, a0, a1, ...)` (tier S2c, comprehensions.py): the keys computed, the lists `a0`, ...
+        sorted by them (one list, or the element lists of a list of tuples)."""
+        line = node.lineno
+        keys, rev, *lists = node.args
+        assert isinstance(keys, ast.Name) and lists and all(isinstance(a, ast.Name) for a in lists)
+        kt = self.list_type(keys.id)
+        if kt not in (Type.I64_ARRAY, Type.F64_ARRAY, Type.STR_LIST):
+            raise Skip(line, f"the keys of a sort are {TYPE_NAME.get(kt, kt.value)}; an AOT program sorts by int, float "
+                             "or str keys")
+        reverse = self.value(rev)
+        if reverse.type is not Type.BOOL:
+            raise Skip(line, f"reverse= is a bool in an AOT program, not {TYPE_NAME.get(reverse.type, reverse.type.value)}")
+        names = tuple(a.id for a in lists)                                  # type: ignore[attr-defined]
+        for a in names:
+            if not self.is_list_name(a):
+                raise Skip(line, f"`{a}` is sorted by a key, but it is not a list the AOT mode holds")
+        self.hoist_ok = False
+        for a in names:
+            self.list_effect(a)
+        return self.take() + [ir.ListSortKeyed(keys.id, reverse, names)]
 
     def list_method_stmt(self, node: ast.Call) -> list[ir.Stmt]:
         """`a.append(v)`, `a.insert(i, v)`, `a.extend(b)`, `a.clear()`, `a.reverse()`, `a.remove(v)` as statements."""

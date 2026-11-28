@@ -563,10 +563,21 @@ one that compares strictly smaller (larger), as CPython's `min_max` does (a NaN 
 iterable raise CPython's `ValueError: min() iterable argument is empty` (an `ir.Raise` statement, made only by
 this rewrite: a `raise` of the program stays refused); with `default=d` an empty iterable gives `d` instead (agent
 proposal, not confirmed; `d` a constant or a name of the items' type, since the loop reads it before the iterable);
-key= is not in yet. A generator
-expression argument stays refused (generators are outside every tier, section 4). Then `zip` and `reversed` of
-other iterables, range objects passed and indexed, in `for` loops and comprehensions; `min` / `max` with key=; `sorted(xs, key=...)` and `list.sort(key=...)` with a key that is a compiled function or a lambda
-written in place. Without a key it is in (agent proposal, not confirmed): `xs.sort(reverse=r)` of a list of int,
+with `key=k` each item's key is computed as the item is read, and the item kept with its key is replaced by one whose
+key compares strictly smaller (larger), as `min_max` does (agent proposal, not confirmed; items of int, float, str,
+bool or tuples of them, keys of those types). A generator expression argument stays refused (generators are outside
+every tier, section 4; the leader accepted them on 2026-11-28, rewritten into the loop with laziness and the
+short-circuit of any() and all() kept, which is the next step). Then `zip` and `reversed` of other iterables, range
+objects passed and indexed, in `for` loops and comprehensions. `sorted(it, key=k)` and `xs.sort(key=k)` are in
+(agent proposal, not confirmed): `k` is the name of a function or a lambda of one parameter, inlined where the key
+is applied (its body binds nothing and makes no function). As `list_sort_impl` does, `reverse` is evaluated first,
+then every key, left to right, into a hidden list (a key that raises stops the sort before any item moved), then
+CPython's listsort orders (key, position) pairs by key only (`TPA__DEF_KEYSORT`, the same `TPA__DEF_SORT`, so the
+pairs move as CPython moves its keys and values together) and each list is moved by the positions (one list, or
+every element list of a list of tuples). Keys are int (raw or big), float or str; a tuple key is not in yet. While
+CPython computes the keys of `xs.sort` the list is empty, so a key that reaches `xs` sees `[]`: `xs.sort(key=k)` is
+refused unless its items are int, float, str, bool, bytes, `str | None` or tuples of them and every name the key
+reads that the function binds holds one of those (sort a copy with sorted() otherwise). Without a key it is in (agent proposal, not confirmed): `xs.sort(reverse=r)` of a list of int,
 float or str, and `sorted(it, reverse=r)` bound to a name or returned (the list built by the loop, then sorted),
 are CPython's own algorithm (timsort, `listsort` in Objects/listobject.c of 3.15.0rc1, the embedded version, ported
 as it is in tp_aot.h as `TPA__DEF_SORT`; 3.15 takes a minrun per run, `minrun_next`, where 3.14 took one for the

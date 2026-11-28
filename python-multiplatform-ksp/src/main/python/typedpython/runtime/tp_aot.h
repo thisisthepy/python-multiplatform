@@ -2077,6 +2077,102 @@ static inline TPA_UNUSED int tpa_f64_sort(tpa_f64_list *l, int reverse)
     return tpa_sort_f64__listsort(l->d, l->len, reverse);
 }
 
+/* Tier S2c: list.sort(key=k) and sorted(it, key=k). list_sort_impl computes every key first, then sorts the keys and
+ * moves the items with them (its sortslice of keys and values). The same order comes from sorting (key, position)
+ * pairs by key only with the same listsort (TPA__DEF_SORT is a permutation that reads only LT, so the pairs move as
+ * the keys do, and reverse reverses them before and after as it reverses keys and values), then moving each list's
+ * items by the positions (tpa_perm_apply: a permutation, the references are moved, never copied). The keys are
+ * computed by the generated code into a list before the sort; a list whose length is not the keys' is CPython's
+ * ValueError("list modified during sort"). The positions and the moving buffer are allocated before any item moves,
+ * so a MemoryError leaves every list as it was.
+ * TPA__DEF_KEYSORT(NAME, KT, LIST, LTK) defines `int NAME(tpa_perm *p, LIST *keys, int reverse, int64_t n, size_t esz)`:
+ * the positions into `*p` (free with tpa_perm_free), 0, or -1 with the error and `*p` empty. */
+typedef struct { int64_t n; int64_t *idx; char *tmp; } tpa_perm;
+static TPA_UNUSED void tpa_perm_free(tpa_perm *p)
+{
+    free(p->idx);
+    free(p->tmp);
+    p->idx = NULL;
+    p->tmp = NULL;
+    p->n = 0;
+}
+static TPA_UNUSED int tpa_sort_len_check(int64_t len, int64_t n)
+{
+    return len == n ? 0 : tpa_raise(TPA_ValueError, "list modified during sort");
+}
+static TPA_UNUSED int tpa_perm__alloc(tpa_perm *p, int64_t n, size_t esz)
+{
+    p->n = n;
+    p->idx = NULL;
+    p->tmp = NULL;
+    if (n <= 0) {
+        p->n = 0;
+        return 0;
+    }
+    if ((uint64_t)n > (uint64_t)SIZE_MAX / (esz > sizeof(int64_t) ? esz : sizeof(int64_t))) {
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    p->idx = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    p->tmp = (char *)malloc((size_t)n * esz);
+    if (p->idx == NULL || p->tmp == NULL) {
+        tpa_perm_free(p);
+        return tpa_raise(TPA_MemoryError, "");
+    }
+    return 0;
+}
+/* the items of `d` (n of size `esz`) in the order of the positions: d'[j] = d[idx[j]] */
+static TPA_UNUSED void tpa_perm_apply(tpa_perm *p, void *d, size_t esz)
+{
+    char *b = (char *)d;
+    int64_t j;
+    if (p->n == 0) {
+        return;
+    }
+    for (j = 0; j < p->n; j++) {
+        memcpy(p->tmp + (size_t)j * esz, b + (size_t)p->idx[j] * esz, esz);
+    }
+    memcpy(b, p->tmp, (size_t)p->n * esz);
+}
+#define TPA__DEF_KEYSORT(NAME, KT, LIST, LTK)                                                        \
+    typedef struct { KT k; int64_t i; } NAME##__pair;                                                \
+    TPA__DEF_SORT(NAME##__s, NAME##__pair, LTK)                                                      \
+    static TPA_UNUSED int NAME(tpa_perm *p, LIST *keys, int reverse, int64_t n, size_t esz)          \
+    {                                                                                                \
+        NAME##__pair *pr;                                                                            \
+        int64_t j;                                                                                   \
+        p->n = 0;                                                                                    \
+        p->idx = NULL;                                                                               \
+        p->tmp = NULL;                                                                               \
+        if (tpa_sort_len_check(keys->len, n) || tpa_perm__alloc(p, n, esz)) {                        \
+            return -1;                                                                               \
+        }                                                                                            \
+        if (n == 0) {                                                                                \
+            return 0;                                                                                \
+        }                                                                                            \
+        pr = (NAME##__pair *)malloc((size_t)n * sizeof(NAME##__pair));                               \
+        if (pr == NULL) {                                                                            \
+            tpa_perm_free(p);                                                                        \
+            return tpa_raise(TPA_MemoryError, "");                                                   \
+        }                                                                                            \
+        for (j = 0; j < n; j++) {                                                                    \
+            pr[j].k = keys->d[j];                                                                    \
+            pr[j].i = j;                                                                             \
+        }                                                                                            \
+        if (NAME##__s__listsort(pr, n, reverse)) {                                                   \
+            free(pr);                                                                                \
+            tpa_perm_free(p);                                                                        \
+            return -1;                                                                               \
+        }                                                                                            \
+        for (j = 0; j < n; j++) {                                                                    \
+            p->idx[j] = pr[j].i;                                                                     \
+        }                                                                                            \
+        free(pr);                                                                                    \
+        return 0;                                                                                    \
+    }
+#define TPA__LT_KNUM(a, b) ((a).k < (b).k)
+TPA__DEF_KEYSORT(tpa_i64_keysort, int64_t, tpa_i64_list, TPA__LT_KNUM)
+TPA__DEF_KEYSORT(tpa_f64_keysort, double, tpa_f64_list, TPA__LT_KNUM)
+
 /* Tier S2a: searching a list[int] of the RAW kind (a list of float is never searched: NaN's identity, design 4.3.2).
  * list.index(v): the first position, else ValueError("list.index(x): x not in list") (Objects/listobject.c
  * list_index_impl since CPython 3.14, the baseline; the value is not formatted); list.count(v); `v in l`. */

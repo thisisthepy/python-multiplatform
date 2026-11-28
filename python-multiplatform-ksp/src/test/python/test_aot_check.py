@@ -240,6 +240,28 @@ def test_bytes_are_not_reported(tmp_path):
     assert report.findings == [], report.lines()
 
 
+def test_a_key_function_is_not_reported(tmp_path):
+    """Tier S2c: the key= of sorted() / min() / max() bound to a name or returned and of `xs.sort(...)`, a function's
+    name or a lambda, compiles (the front end checks the rest); a lambda anywhere else is still reported."""
+    path = write(tmp_path, """
+        def g(v: int) -> int:
+            return -v
+
+        def f(xs: list[int], ws: list[str]) -> int:
+            a = sorted(xs, key=g)
+            b = sorted(ws, key=lambda w: w[1:], reverse=True)
+            xs.sort(key=lambda v: v % 3)
+            m = min(xs, key=g)
+            n = max(ws, key=len, default="")
+            h = lambda v: v
+            return len(a) + len(b) + m + len(n) + h(1)
+    """)
+    report = aotcheck.check(path, front_end=False)
+    got = sorted((f.line, f.rule, f.name) for f in report.findings)
+    assert [(r, n) for _, r, n in got] == [("aot/closure", "lambda")], report.lines()
+    assert got[0][0] == 10, report.lines()
+
+
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):
     """Tier S2b: `from collections.abc import KeysView, ValuesView, ItemsView` names the types of a view passed to or
     returned from a function (the front end checks how the view is used)."""

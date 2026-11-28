@@ -754,6 +754,20 @@ class ListSort(Stmt):
 
 
 @dataclass(frozen=True)
+class ListSortKeyed(Stmt):
+    """The keyed sort of tier S2c (comprehensions.py `KEYSORT`): `keys` (a list of int, float or str, one key per item,
+    computed before) gives the order; CPython's listsort sorts the (key, position) pairs by key only (tp_aot.h
+    `tpa_keysort_*`), reversed before and after when `reverse` (BOOL, evaluated first) is true, and every list of
+    `arrays` (one list, or the element lists of a list of tuples, each as long as `keys`) is permuted by the result:
+    what list_sort_impl does moving the keys and the items together. A list whose length is no longer the keys'
+    raises CPython's ValueError("list modified during sort")."""
+
+    keys: str
+    reverse: Expr
+    arrays: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ListReverse(Stmt):
     """`array.reverse()`."""
 

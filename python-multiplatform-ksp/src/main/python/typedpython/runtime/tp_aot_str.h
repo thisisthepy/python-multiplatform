@@ -1216,6 +1216,9 @@ static TPA_UNUSED int tpa_str_list_sort(tpa_str_list *l, int reverse)
 {
     return tpa_sort_str__listsort(l->d, l->len, reverse);
 }
+/* Tier S2c: sorting by str keys (TPA__DEF_KEYSORT in tp_aot.h), in code point order */
+#define TPA__LT_KSTR(a, b) (tpa_str_cmp((a).k, (b).k) < 0)
+TPA__DEF_KEYSORT(tpa_str_keysort, tpa_str *, tpa_str_list, TPA__LT_KSTR)
 
 /* A growing list while split builds its result (a private buffer, not a value). */
 typedef struct {

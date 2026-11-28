@@ -3166,6 +3166,31 @@ class _Fn:
             return
         self.emit(f"if ({self.lop(found[1], 'sort')}({found[0]}, {rev})) {self.fail()}")
 
+    def st_ListSortKeyed(self, s: ir.ListSortKeyed) -> None:
+        """The keyed sort (tp_aot.h `TPA__DEF_KEYSORT`): every list as long as the keys (else CPython's ValueError),
+        the positions sorted by key, then every list moved by them."""
+        rev = self.ev(s.reverse)
+        keys = self.grow_list(s.keys, "the keys of a sort")
+        lists = [self.grow_list(a, "a keyed sort") for a in s.arrays]
+        if keys is None or any(x is None for x in lists):
+            return
+        fn = {"i64": "tpa_i64_keysort", "f64": "tpa_f64_keysort", "int": "tpa_int_keysort", "str": "tpa_str_keysort"}
+        if keys[1] not in fn or self.types.get(s.keys) is Type.STR_OPT_LIST:
+            self.bad("aot/ir-node", "ListSortKeyed", f"the keys `{s.keys}`: only int, float or str keys are sorted by")
+            return
+        first = lists[0][0]                                                 # type: ignore[index]
+        self.emit("{")
+        self.emit("    tpa_perm tpa_pm;")
+        self.emit(f"    size_t tpa_esz = sizeof {first}->d[0];")
+        for c, _ in lists[1:]:                                              # type: ignore[misc]
+            self.emit(f"    if (sizeof {c}->d[0] > tpa_esz) tpa_esz = sizeof {c}->d[0];")
+            self.emit(f"    if (tpa_sort_len_check({c}->len, {first}->len)) {self.fail()}")
+        self.emit(f"    if ({fn[keys[1]]}(&tpa_pm, {keys[0]}, {rev}, {first}->len, tpa_esz)) {self.fail()}")
+        for c, _ in lists:                                                  # type: ignore[misc]
+            self.emit(f"    tpa_perm_apply(&tpa_pm, (void *){c}->d, sizeof {c}->d[0]);")
+        self.emit("    tpa_perm_free(&tpa_pm);")
+        self.emit("}")
+
     def st_ListReverse(self, s: ir.ListReverse) -> None:
         found = self.grow_list(s.array, "a reverse")
         if found is not None:

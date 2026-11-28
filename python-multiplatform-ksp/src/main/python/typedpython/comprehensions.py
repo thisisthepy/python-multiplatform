@@ -31,7 +31,16 @@ true or false item, through every clause's loop; min() and max() keep the first 
 compares strictly smaller (larger), as `min_max` does, and of an empty iterable raise CPython's ValueError (an
 `ir.Raise`, through a `raise` statement this pass marks) or, given `default=d`, are `d` (a constant or a name, of the
 items' type: the rewrite reads it before the loop reads the iterable, which only a constant or a name allows); `sorted(it, reverse=r)` is the list built by the loop,
-then sorted in place by CPython's listsort (`list.sort`, tp_aot.h), `r` a bool constant or a name. A generator expression is not accepted (design: no generators in
+then sorted in place by CPython's listsort (`list.sort`, tp_aot.h), `r` a bool constant or a name.
+
+`key=k` (sorted(), min(), max(), and `xs.sort(key=k)` as a statement): `k` is the name of a function or a lambda of one
+parameter, applied by inlining (`f(v)`, or the lambda's body with its parameter as `v`), its value typed at the probe
+through `(tp_key__p := <applied>), tp_key__p`. min() / max() compute each item's key as it is read and keep the item
+whose key compares strictly smaller (larger). A keyed sort is what list_sort_impl does: `r` first, then the keys of
+the list's items, left to right, into a hidden list, then the marker statement `KEYSORT(keys, r, xs)`, which the
+lowering makes an `ir.ListSortKeyed` (the (key, position) pairs sorted by CPython's listsort, each list moved by the
+positions; tuples.py gives it every element list of a list of tuples). `xs.sort(key=k)` only where the key cannot reach
+`xs` (CPython shows the key an empty list): see `_list_keyed_sort`. A generator expression is not accepted (design: no generators in
 any tier), so `sum(x * 2 for x in xs)` stays refused.
 
 Not rewritten, left for the lowering to refuse naming the reason: a comprehension anywhere else (an operand, an
@@ -48,6 +57,9 @@ from typedpython import rebinding
 COMPS = (ast.ListComp, ast.SetComp, ast.DictComp)
 REDUCERS = ("sum", "any", "all", "min", "max", "sorted")
 Kinds = dict[str, dict[str, list[tuple[int, str]]]]
+KEYSORT = "__tp_keysort"    # `KEYSORT(keys, reverse, L)`: sort L by the keys list (ir.ListSortKeyed); tuples.py splits L
+KEY = "<key>"               # the probe's entry of a site's key, beside its variables
+_KEY_TYPES = ("int", "float", "str")    # a key of a sort (a list of bool does not exist yet); min / max take bool too
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,43 @@ def _reducer_of(s: ast.stmt) -> ast.Call | None:
     return None
 
 
+def _keyed_sort_of(s: ast.stmt) -> ast.Call | None:
+    """`xs.sort(..., key=k, ...)` as a statement, of a name (tier S2c: the keyed sort this pass rewrites)."""
+    if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Attribute) \
+            and s.value.func.attr == "sort" and isinstance(s.value.func.value, ast.Name) \
+            and any(k.arg == "key" for k in s.value.keywords):
+        return s.value
+    return None
+
+
+def _key_of(call: ast.Call | None) -> ast.expr | None:
+    return None if call is None else next((k.value for k in call.keywords if k.arg == "key"), None)
+
+
+def _applied(key: ast.expr, arg: str) -> ast.expr:
+    """The key applied to the local `arg`: `f(arg)` for a name, the lambda's body with its parameter as `arg`."""
+    if isinstance(key, ast.Lambda):
+        return _renamed(key.body, {key.args.args[0].arg: arg})              # type: ignore[return-value]
+    return ast.Call(func=_renamed(key, {}), args=[ast.Name(id=arg, ctx=ast.Load())], keywords=[])
+
+
+def _check_key(key: ast.expr, line: int) -> None:
+    """A key is the name of a function or a lambda of one positional parameter whose body binds nothing and makes
+    no function (inlined, it is evaluated where the key would be called, with the names it reads read then)."""
+    if isinstance(key, ast.Name):
+        return
+    if not isinstance(key, ast.Lambda):
+        raise _Problem(line, f"the key= `{ast.unparse(key)}` is the name of a function or a lambda of one parameter in "
+                             "an AOT program")
+    a = key.args
+    if len(a.args) != 1 or a.posonlyargs or a.kwonlyargs or a.vararg or a.kwarg or a.defaults:
+        raise _Problem(line, f"the key `{ast.unparse(key)}` is a lambda of one parameter in an AOT program")
+    for n in ast.walk(key.body):
+        if isinstance(n, (ast.NamedExpr, ast.Lambda, ast.GeneratorExp, ast.Yield, ast.YieldFrom, ast.Await, *COMPS)):
+            raise _Problem(line, f"the key `{ast.unparse(key)}`: a lambda key holds no comprehension, lambda, generator "
+                                 "or `:=` in an AOT program")
+
+
 def _comp_of(s: ast.stmt) -> ast.ListComp | ast.SetComp | ast.DictComp | None:
     value = _value_of(s)
     if value is None:
@@ -115,16 +164,17 @@ def sites(functions: list[tuple[str, ast.FunctionDef]]) -> list[Site]:
         for s in _own_statements(fn):
             if (c := _comp_of(s)) is not None:
                 out.append(Site(q, s, c))
-            elif (call := _reducer_of(s)) is not None:
+            elif (call := _reducer_of(s) or _keyed_sort_of(s)) is not None:
                 while True:
                     k += 1
                     v = f"item__s{k}"
                     if v not in taken:
                         taken.add(v)
                         break
+                it = call.func.value if isinstance(call.func, ast.Attribute) else call.args[0]
                 gen = ast.GeneratorExp(elt=ast.Name(id=v, ctx=ast.Load()), generators=[ast.comprehension(
-                    target=ast.Name(id=v, ctx=ast.Store()), iter=call.args[0], ifs=[], is_async=0)])
-                out.append(Site(q, s, ast.copy_location(gen, call.args[0]), call))
+                    target=ast.Name(id=v, ctx=ast.Store()), iter=it, ifs=[], is_async=0)])
+                out.append(Site(q, s, ast.copy_location(gen, it), call))
     return out
 
 
@@ -155,14 +205,27 @@ def probe(probed: str, probes: list[rebinding.Probe], wanted: list[rebinding.Ass
         names = _variables(site.comp)
         if not names:
             continue
-        head = "[(" + "".join(f"{n}, " for n in names) + ") for "
+        key = _key_of(site.call)
+        applied = ""
+        if key is not None and isinstance(key, (ast.Name, ast.Lambda)) and len(names) == 1:
+            try:
+                _check_key(key, s.lineno)
+                applied = ast.unparse(_applied(key, names[0]))
+            except _Problem:
+                applied = ""                        # (refused with its reason by the rewrite)
+        head = "[(" + "".join(f"{n}, " for n in names)
         offsets: dict[str, int] = {}
-        text = head
         # the loads: the tuple at the head; offsets in UTF-8 bytes from the start of the insertion
         pos = len("[(".encode())
         for n in names:
             offsets[n] = pos
             pos += len(f"{n}, ".encode())
+        if applied:
+            # the key's value, through a name whose load is typed: `(tp_key__p := <key applied>), tp_key__p, `
+            bound = f"(tp_key__p := {applied}), "
+            head += bound + "tp_key__p, "
+            offsets[KEY] = pos + len(bound.encode())
+        text = head + ") for "
         text += " for ".join(f"{ast.unparse(g.target)} in {ast.unparse(g.iter)}" for g in site.comp.generators)
         text += "]; "
         size = len(text.encode())
@@ -171,7 +234,7 @@ def probe(probed: str, probes: list[rebinding.Probe], wanted: list[rebinding.Ass
         probes = [rebinding.Probe(p.name, p.line, p.column + size, p.assignment)
                   if p.line == line_no and p.column > at else p for p in probes]
         placed = {k: ((ln, col + size) if ln == line_no and col > at else (ln, col)) for k, (ln, col) in placed.items()}
-        for n in names:
+        for n in offsets:
             placed[(id(site.comp), n)] = (line_no, at + offsets[n] + 1)
     return "".join(lines), probes, placed
 
@@ -259,6 +322,13 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
             raise _Problem(n.lineno, f"`{ast.unparse(n)}` inside the comprehension `{ast.unparse(comp)}`: a "
                                      "comprehension holds no comprehension, generator or lambda in an AOT program yet")
     call = site.call
+    key = _key_of(call)
+    key_type = ""
+    if key is not None:
+        _check_key(key, line)
+        key_type = _key_type(types.get((id(comp), KEY)), call, line)    # type: ignore[arg-type]
+    if call is not None and isinstance(call.func, ast.Attribute):
+        return _list_keyed_sort(site, fn, kinds, types, taken, counter, key, key_type)   # type: ignore[arg-type]
     if call is not None:
         if call.func.id == "sum":                                           # type: ignore[attr-defined]
             if len(call.args) + len(call.keywords) > 2 or any(k.arg != "start" for k in call.keywords) \
@@ -267,7 +337,7 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
         elif call.func.id == "sorted":                                      # type: ignore[attr-defined]
             for k in call.keywords:
                 if k.arg == "key":
-                    raise _Problem(line, f"`{ast.unparse(call)}`: sorted(key=...) is not in the AOT mode yet")
+                    continue
                 if k.arg != "reverse":
                     raise _Problem(line, f"`{ast.unparse(call)}`: sorted() takes no keyword `{k.arg}`")
                 if not (isinstance(k.value, ast.Name) or (isinstance(k.value, ast.Constant)
@@ -276,6 +346,8 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
                                          "in an AOT program (CPython evaluates it before it reads the iterable)")
         elif call.func.id in ("min", "max") and call.keywords:              # type: ignore[attr-defined]
             for k in call.keywords:
+                if k.arg == "key":
+                    continue
                 if k.arg != "default":
                     raise _Problem(line, f"{call.func.id}() of an iterable takes no {k.arg}= in an AOT program yet")  # type: ignore[attr-defined]
                 d = k.value.operand if isinstance(k.value, ast.UnaryOp) and isinstance(k.value.op, ast.USub) \
@@ -334,7 +406,7 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
     # the innermost statement: add the element
     accn = lambda ctx: ast.Name(id=acc, ctx=ctx)    # noqa: E731
     if call is not None:
-        return _reduce(site, call, annotation, acc, clauses, mapping, kinds, taken, counter)
+        return _reduce(site, call, annotation, acc, clauses, mapping, kinds, taken, counter, key, key_type)
     if isinstance(comp, ast.DictComp):
         key, value = _renamed(comp.key, mapping), _renamed(comp.value, mapping)
         inner: list[ast.stmt] = []
@@ -380,8 +452,9 @@ def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
     if name in ("any", "all"):
         return ast.Name(id="bool", ctx=ast.Load())
     if name == "sorted":
-        if spelled in ("list[int]", "list[float]", "list[str]"):
-            return _annotation_of(spelled, line)
+        if spelled in ("list[int]", "list[float]", "list[str]") \
+                or (_key_of(call) is not None and spelled.startswith("list[") and spelled.endswith("]")):
+            return _annotation_of(spelled, line)        # (with a key, the items are any the lowering lists)
         raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: an AOT program sorts int, float or str items")
     if name in ("min", "max"):
         import re
@@ -389,9 +462,14 @@ def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
                  for p in spelled.split("|")}
         if len(parts) == 1 and next(iter(parts)) in _ZERO:
             return ast.Name(id=next(iter(parts)), ctx=ast.Load())
+        if len(parts) == 1 and _key_of(call) is not None and _zero_tuple(next(iter(parts))) is not None:
+            return _annotation_of(next(iter(parts)), line)      # (with a key: a tuple of int, float, str or bool)
         if any(k.arg == "default" for k in call.keywords):
             raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: the default= of {name}() has the items' type "
                                  "in an AOT program (int, float, str or bool)")
+        if _key_of(call) is not None:
+            raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: an AOT program compiles {name}() with a key of "
+                                 "int, float, str or bool items, or of tuples of them")
         raise _Problem(line, f"`{ast.unparse(call)}` is a {spelled}: an AOT program compiles {name}() of int, float, "
                              "str or bool items")
     start = call.args[1] if len(call.args) == 2 else next((k.value for k in call.keywords if k.arg == "start"), None)
@@ -414,9 +492,112 @@ def _reduced_type(call: ast.Call, spelled: str, line: int) -> ast.expr:
 _ZERO = {"int": 0, "float": 0.0, "str": "", "bool": False}     # a placeholder of each type min() / max() hold
 
 
+def _zero_tuple(spelled: str) -> ast.expr | None:
+    """The placeholder of a `tuple[...]` of int, float, str and bool (a fixed shape), else None."""
+    try:
+        t = ast.parse(spelled, mode="eval").body
+    except SyntaxError:
+        return None
+    if not (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == "tuple"):
+        return None
+    elts = t.slice.elts if isinstance(t.slice, ast.Tuple) else [t.slice]
+    if not elts or not all(isinstance(e, ast.Name) and e.id in _ZERO for e in elts):
+        return None
+    return ast.Tuple(elts=[ast.Constant(_ZERO[e.id]) for e in elts], ctx=ast.Load())    # type: ignore[union-attr]
+
+
+def _key_type(spelled: str | None, call: ast.Call, line: int) -> str:
+    """The type of a key's value (int, float or str; of min() / max() bool too), from its probe."""
+    import re
+    name = call.func.attr if isinstance(call.func, ast.Attribute) else call.func.id      # type: ignore[attr-defined]
+    if spelled is None:
+        raise _Problem(line, f"`{ast.unparse(call)}`: no type is known for the value of its key")
+    parts = {"int" if re.fullmatch(r"(typing\.)?Literal\[-?\d+\]", p.strip()) else rebinding._base(p.strip())
+             for p in spelled.split("|")}
+    allowed = (*_KEY_TYPES, "bool") if name in ("min", "max") else _KEY_TYPES
+    if len(parts) != 1 or next(iter(parts)) not in allowed:
+        raise _Problem(line, f"`{ast.unparse(call)}`: its key gives a {spelled}; an AOT program compares by an int, "
+                             f"float or str key{' or a bool one' if name in ('min', 'max') else ''} (a tuple key is "
+                             "not in the AOT mode yet)")
+    return next(iter(parts))
+
+
+_SCALARS = {"int", "float", "str", "bool", "bytes", "str | None", "None | str"}
+
+
+def _keyed_tail(listname: str, key: ast.expr, key_type: str, reverse: ast.expr, item: str, line: int,
+                kinds: dict[str, list[tuple[int, str]]], taken: set[str], counter: dict[str, int],
+                q: str) -> list[ast.stmt]:
+    """The keyed sort of the list `listname`, as list_sort_impl does it: `reverse` evaluated first, then the keys,
+    one per item, left to right, into a hidden list, then the sort of the (key, position) pairs moving the items."""
+    out: list[ast.stmt] = []
+    rev = reverse
+    if not isinstance(reverse, ast.Constant):
+        r = _fresh("reverse", taken, counter, q)
+        out.append(ast.AnnAssign(target=ast.Name(id=r, ctx=ast.Store()), annotation=ast.Name(id="bool", ctx=ast.Load()),
+                                 value=reverse, simple=1))
+        rev = ast.Name(id=r, ctx=ast.Load())
+    keys = _fresh("keys", taken, counter, q)
+    kv = _fresh("kv", taken, counter, q)
+    kinds[kv] = [(line, item)]
+    out.append(ast.AnnAssign(target=ast.Name(id=keys, ctx=ast.Store()), annotation=_annotation_of(f"list[{key_type}]", line),
+                             value=ast.List(elts=[], ctx=ast.Load()), simple=1))
+    append = ast.Expr(value=ast.Call(func=ast.Attribute(value=ast.Name(id=keys, ctx=ast.Load()), attr="append",
+                                                        ctx=ast.Load()), args=[_applied(key, kv)], keywords=[]))
+    out.append(ast.For(target=ast.Name(id=kv, ctx=ast.Store()), iter=ast.Name(id=listname, ctx=ast.Load()),
+                       body=[append], orelse=[]))
+    out.append(ast.Expr(value=ast.Call(func=ast.Name(id=KEYSORT, ctx=ast.Load()),
+                                       args=[ast.Name(id=keys, ctx=ast.Load()), rev,
+                                             ast.Name(id=listname, ctx=ast.Load())], keywords=[])))
+    return out
+
+
+def _list_keyed_sort(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[int, str]]],
+                     types: dict[tuple[int, str], str], taken: set[str], counter: dict[str, int], key: ast.expr,
+                     key_type: str) -> list[ast.stmt]:
+    """`xs.sort(key=k, reverse=r)`. While CPython computes the keys the list is empty (list_sort_impl sets its size
+    to 0), so a key that reaches `xs` sees `[]`: the keys here are computed with `xs` as it is, which is the same only
+    when the key cannot reach the list: the items are int, float, str, bool, bytes or tuples of them, and every name
+    the key reads that the function binds holds one of those."""
+    s, call, line = site.stmt, site.call, site.stmt.lineno
+    assert call is not None and isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+    name = call.func.value.id
+    if call.args:
+        raise _Problem(line, f"`{ast.unparse(call)}`: list.sort() takes no positional argument")
+    for k in call.keywords:
+        if k.arg not in ("key", "reverse"):
+            raise _Problem(line, f"`{ast.unparse(call)}`: list.sort() takes no keyword `{k.arg}`")
+    item = types.get((id(site.comp), site.comp.elt.id))                    # type: ignore[union-attr]
+    if item is None:
+        raise _Problem(line, f"`{ast.unparse(call)}`: no type is known for the items of `{name}`")
+    empty = ("CPython shows the key an empty list while it computes the keys; sort a copy with sorted() instead")
+    if item not in _SCALARS and _zero_tuple(item) is None:
+        raise _Problem(line, f"`{ast.unparse(call)}`: the items of `{name}` are {item}, which may reach `{name}`, and "
+                             + empty)
+    bound = {a.arg for a in ast.walk(fn) if isinstance(a, ast.arg)} | \
+        {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    if isinstance(key, ast.Lambda):
+        param = key.args.args[0].arg
+        called = {id(c.func) for c in ast.walk(key.body) if isinstance(c, ast.Call)}
+        annotated = {a.arg: ast.unparse(a.annotation) for a in fn.args.args if a.annotation is not None}
+        annotated.update({t.target.id: ast.unparse(t.annotation) for t in ast.walk(fn)
+                          if isinstance(t, ast.AnnAssign) and isinstance(t.target, ast.Name)})
+        for n in ast.walk(key.body):
+            if not isinstance(n, ast.Name) or n.id == param or id(n) in called or n.id not in bound:
+                continue
+            spelled = {annotated[n.id]} if n.id in annotated else {k for _, k in kinds.get(n.id, [])}
+            if not spelled or not all(t in _SCALARS for t in spelled):
+                raise _Problem(line, f"`{ast.unparse(call)}`: its key reads `{n.id}`, which may be `{name}`, and "
+                                     + empty)
+    reverse = next((k.value for k in call.keywords if k.arg == "reverse"), ast.Constant(False))
+    out = _keyed_tail(name, key, key_type, reverse, item, line, kinds, taken, counter, site.qname)
+    return [_located(x, s) for x in out]                                    # type: ignore[misc]
+
+
 def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
             clauses: list[tuple[ast.expr, ast.expr, list[ast.expr]]], mapping: dict[str, str],
-            kinds: dict[str, list[tuple[int, str]]], taken: set[str], counter: dict[str, int]) -> list[ast.stmt]:
+            kinds: dict[str, list[tuple[int, str]]], taken: set[str], counter: dict[str, int],
+            key: ast.expr | None = None, key_type: str = "") -> list[ast.stmt]:
     """The statements of a sum() / any() / all() site (see the module docstring)."""
     import copy
     s, line, name = site.stmt, site.stmt.lineno, call.func.id              # type: ignore[attr-defined]
@@ -435,19 +616,43 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
                                          args=[item], keywords=[]))]
         tail = [ast.Expr(value=ast.Call(func=ast.Attribute(value=load(acc), attr="sort", ctx=ast.Load()), args=[],
                                         keywords=[ast.keyword(arg="reverse", value=copy.deepcopy(reverse))]))]
+        if key is not None:
+            # the list built, then its keys, then the sort of the pairs (sorted() is list(it).sort(key=k))
+            v = site.comp.elt.id                                            # type: ignore[union-attr]
+            spelled = [k for ln, k in kinds.get(mapping[v], []) if ln == line]
+            tail = _keyed_tail(acc, key, key_type, copy.deepcopy(reverse), spelled[0], line, kinds, taken, counter,
+                               site.qname)
     elif name in ("min", "max"):
-        assert isinstance(annotation, ast.Name)
         seen = _fresh("seen", taken, counter, site.qname)
         default = next((k.value for k in call.keywords if k.arg == "default"), None)
+        placeholder = ast.Constant(_ZERO[annotation.id]) if isinstance(annotation, ast.Name) else \
+            _zero_tuple(ast.unparse(annotation))
+        assert placeholder is not None
         head = [ast.AnnAssign(target=store(seen), annotation=ast.Name(id="bool", ctx=ast.Load()),
                               value=ast.Constant(False), simple=1),
                 ast.AnnAssign(target=store(acc), annotation=annotation,
-                              value=copy.deepcopy(default) if default is not None else ast.Constant(_ZERO[annotation.id]),
+                              value=copy.deepcopy(default) if default is not None else placeholder,
                               simple=1)]
-        better = ast.Compare(left=item, ops=[ast.Lt() if name == "min" else ast.Gt()], comparators=[load(acc)])
-        inner = [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)),
-                        body=[assign(acc, copy.deepcopy(item)), assign(seen, ast.Constant(True))],
-                        orelse=[ast.If(test=better, body=[assign(acc, copy.deepcopy(item))], orelse=[])])]
+        op = ast.Lt() if name == "min" else ast.Gt()
+        if key is None:
+            better = ast.Compare(left=item, ops=[op], comparators=[load(acc)])
+            inner = [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)),
+                            body=[assign(acc, copy.deepcopy(item)), assign(seen, ast.Constant(True))],
+                            orelse=[ast.If(test=better, body=[assign(acc, copy.deepcopy(item))], orelse=[])])]
+        else:
+            # min_max: the key of each item as it is read; the item kept with its key, replaced by a strictly
+            # smaller (larger) key
+            best, kv = _fresh("best", taken, counter, site.qname), _fresh("kv", taken, counter, site.qname)
+            kinds[kv] = [(line, key_type)]
+            head.append(ast.AnnAssign(target=store(best), annotation=ast.Name(id=key_type, ctx=ast.Load()),
+                                      value=ast.Constant(_ZERO[key_type]), simple=1))
+            v = site.comp.elt.id                                            # type: ignore[union-attr]
+            better = ast.Compare(left=load(kv), ops=[op], comparators=[load(best)])
+            keep = [assign(acc, copy.deepcopy(item)), assign(best, load(kv))]
+            inner = [assign(kv, _applied(key, mapping[v])),
+                     ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)),
+                            body=[*copy.deepcopy(keep), assign(seen, ast.Constant(True))],
+                            orelse=[ast.If(test=better, body=keep, orelse=[])])]
         empty = ast.Raise(exc=None, cause=None)
         empty.tp_builtin_raise = ("ValueError", f"{name}() iterable argument is empty")     # type: ignore[attr-defined]
         tail = [] if default is not None else [ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)), body=[empty],

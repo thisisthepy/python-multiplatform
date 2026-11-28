@@ -373,7 +373,7 @@ from .ir import CheckExact, CheckMethod, ClassDecl, FieldGet, FieldSet, Is, IsEx
 from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 from .ir import ParInfo
 from .ir import ListAppend, ListClear, ListExtend, ListInsert, ListPop, ListRemove, ListReverse, ListSearch, ListStr
-from .ir import ListSort
+from .ir import ListSort, ListSortKeyed
 from .ir import ListCompare, ListConcat, ListRepeat, ListSlice, ListDelete, ListSetSlice
 from .ir import ForObjList, ObjListDisplay, ObjListIndex, ObjListLen, ObjListStore, StrListStore, TupleIndex
 from .ir import (
@@ -440,7 +440,7 @@ RAISE_KINDS = frozenset({"ValueError"})
 # The statements and expressions only the AOT mode (`verify(m, aot=True)`) accepts. (An `FString` and its
 # `FormatField`s are checked by `s_Print`, which is the only place one may stand.)
 _AOT_STMTS = frozenset({Print, ReturnTuple, Unpack, TimeSleep, SysExit, Raise, ForStr,
-                        ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListSort, ListRemove,
+                        ListAppend, ListInsert, ListExtend, ListClear, ListReverse, ListSort, ListSortKeyed, ListRemove,
                         ListDelete, ListSetSlice, ObjListStore, StrListStore, ForObjList,     # tier S2a
                         *ir.DICT_STMTS})                                                      # tier S2b
 _AOT_EXPRS = frozenset({ListDisplay, Cond, ArgvInt, ArgvLen, FloatToInt, BoolToInt, StrToInt, TimeCall,
@@ -3025,6 +3025,18 @@ class _Checker:
         at = self.list_changed(s.array, "sort", state)
         if at not in (Type.I64_ARRAY, Type.F64_ARRAY, Type.STR_LIST) and at is not None:
             self.error(TYPE, f"sort of '{s.array}' ({at.value}): only a list of int, float or str is sorted")
+        return dataclasses.replace(s, reverse=reverse), state
+
+    def s_ListSortKeyed(self, s: ListSortKeyed, state: _State):
+        reverse = self.expr(s.reverse, state)
+        self.slot(reverse, Type.BOOL, f"reverse of the keyed sort of '{s.keys}'")
+        kt = self.list_of(s.keys, "keyed sort", state)
+        if kt not in (Type.I64_ARRAY, Type.F64_ARRAY, Type.STR_LIST) and kt is not None:
+            self.error(TYPE, f"keys '{s.keys}' of a sort ({kt.value}): only int, float or str keys are sorted by")
+        if not s.arrays:
+            self.error(TYPE, f"keyed sort by '{s.keys}' of no list")
+        for a in s.arrays:
+            self.list_changed(a, "sort", state)
         return dataclasses.replace(s, reverse=reverse), state
 
     def s_ListRemove(self, s: ListRemove, state: _State):

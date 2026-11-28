@@ -2608,6 +2608,10 @@ static TPA_UNUSED int tpa_int_list_sort(tpa_int_list *l, int reverse)
     return tpa_sort_int__listsort(l->d, l->len, reverse);
 }
 
+/* Tier S2c: sorting by big-capable int keys (TPA__DEF_KEYSORT in tp_aot.h) */
+#define TPA__LT_KINT(a, b) (tpa_int_cmp((a).k, (b).k) < 0)
+TPA__DEF_KEYSORT(tpa_int_keysort, tpa_int, tpa_int_list, TPA__LT_KINT)
+
 /* list.pop: the element's reference moves to `*out` (which gives up the one it held) */
 static TPA_UNUSED int tpa_int_list_pop(tpa_int_list *l, int has_index, int64_t i, tpa_int *out)
 {

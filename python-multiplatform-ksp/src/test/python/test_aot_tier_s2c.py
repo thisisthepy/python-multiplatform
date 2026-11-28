@@ -457,16 +457,13 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = [1.5, 2.5]\n    s: float = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
     ("    xs = [1, 2]\n    s = any(xs, xs)\n    print(s)\n", "one argument"),
     ("    xs = [1, 2]\n    s = sum(x * 2 for x in xs)\n    print(s)\n", "generator expression"),
-    # min() and max() of an iterable are bound to a name or returned; no key= yet; default= is a constant or a name
+    # min() and max() of an iterable are bound to a name or returned; default= is a constant or a name
     # of the items' type
     ("    xs = [1, 2]\n    print(min(xs))\n", "bind it to a name"),
-    ("    xs = [1, 2]\n    m = min(xs, key=abs)\n    print(m)\n", "key"),
     ("    xs = [1, 2]\n    m = max(xs, default=None)\n    print(m)\n", "default"),
     ("    xs = [1, 2]\n    m = max(xs, default=len(xs))\n    print(m)\n", "default"),
     ("    xs = [1.5]\n    m = min(xs, default=0)\n    print(m)\n", "default"),
-    # sorted() and list.sort() without a key yet; sorted() bound to a name or returned
-    ("    xs = [1, 2]\n    xs.sort(key=abs)\n    print(xs)\n", "key"),
-    ("    xs = [1, 2]\n    ys = sorted(xs, key=abs)\n    print(ys)\n", "key"),
+    # sorted() bound to a name or returned
     ("    xs = [1, 2]\n    print(sorted(xs))\n", "bind it to a name"),
     ("    xs = [1, 2]\n    ys = sorted(xs, reverse=len(xs) > 1)\n    print(ys)\n", "reverse"),
     # (found here: a comprehension over a list[float] was refused, and float() of a str reached the verifier)
@@ -650,3 +647,146 @@ def test_min_and_max_with_a_default_give_it_for_an_empty_iterable(tmp_path: Path
     ValueError when the iterable is empty; `d` a constant or a name of the items' type. Agent proposal, not
     owner-confirmed."""
     _compare(tmp_path, MINMAX_DEFAULT, [["3,1,4", "b,a,c"], ["", ""], ["7", "z"]])
+
+
+KEYED = """
+import sys
+
+
+class P:
+    name: str
+    age: int
+
+    def __init__(self, name: str, age: int) -> None:
+        self.name = name
+        self.age = age
+
+
+def lcg(x: int) -> int:
+    return (x * 1103515245 + 12345) % 2147483648
+
+
+def mod7(x: int) -> int:
+    return x % 7
+
+
+def tail(w: str) -> str:
+    return w[1:]
+
+
+def by_tail(words: list[str]) -> list[str]:
+    return sorted(words, key=tail)
+
+
+def main() -> None:
+    seed = int(sys.argv[1])
+    n = int(sys.argv[2])
+    xs = [0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        xs[i] = seed % 50
+    a = sorted(xs, key=mod7)
+    b = sorted(xs, key=lambda v: -v, reverse=True)
+    k = 3
+    many = n > 100
+    c = sorted(xs, key=lambda v: v % k, reverse=many)
+    print(a)
+    print(b)
+    print(c)
+    inf = 1e308 * 10.0
+    nan = inf - inf
+    fl = [0.0] * n
+    for i in range(n):
+        seed = lcg(seed)
+        j = seed % 20
+        fl[i] = nan if j == 0 else j / 4 - 2
+    fa = sorted(fl, key=abs)
+    fl.sort(key=lambda v: v * v, reverse=True)
+    print(fa)
+    print(fl)
+    big = [v * 1000000000000000000 - 7 for v in xs]
+    big.sort(key=lambda v: v % 1000000000000000003)
+    if n > 0:
+        print(big[0], big[n // 2], big[n - 1])
+    keyed = sorted(xs, key=lambda v: v * 1000000000000000000 % 997)
+    print(keyed)
+    words = sys.argv[3].split(",")
+    w1 = sorted(words, key=len)
+    w2 = by_tail(words)
+    words.sort(key=tail, reverse=True)
+    print(w1, w2, words)
+    d = {"bb": 1, "a": 2, "ccc": 0}
+    byval = sorted(d, key=lambda s: d[s])
+    print(byval)
+    pairs: list[tuple[int, str]] = []
+    for x in xs:
+        pairs.append((x % 5, str(x)))
+    pairs.sort(key=lambda p: p[1])
+    print(pairs)
+    sp = sorted(pairs, key=lambda p: p[0], reverse=True)
+    print(sp)
+    lo = min(words, key=len, default="none")
+    hi = max(xs, key=mod7, default=-1)
+    first = min(xs, key=lambda v: v % 4, default=-1)
+    fm = max(fl, key=lambda v: v * v, default=0.0)
+    print(lo, hi, first, fm)
+    ps = [P("a", 3), P("b", 5), P("c", 5), P("d", 1)]
+    srt = sorted(ps, key=lambda p: p.age, reverse=True)
+    for p in srt:
+        print(p.name, p.age)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_key_function_sorts_and_compares_by_its_keys(tmp_path: Path):
+    """`sorted(it, key=k)`, `xs.sort(key=k)`, `min(it, key=k)` and `max(it, key=k)` (design 4.3.2, S2c), `k` the name
+    of a function or a one-parameter lambda: the keys are computed once per item, left to right, after the list is
+    built (sort) or as each item is read (min, max), and CPython's listsort orders the (key, position) pairs, so equal
+    keys keep their order and reverse=True keeps it too, NaN keys end up where CPython puts them, and every list of a
+    list of tuples moves together. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, KEYED, [["1", "0", "a"], ["7", "65", "bb,a,ccc,dd"], ["42", "700", "xy,yx,x,zz,az"],
+                               ["5", "2000", "q"]])
+
+
+KEY_RAISES = """
+import sys
+
+
+def main() -> None:
+    xs = [int(t) for t in sys.argv[1].split(",")]
+    ys = sorted(xs, key=lambda v: 100 // v)
+    print(ys)
+    xs.sort(key=lambda v: 60 // (v - 1))
+    print(xs)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_key_that_raises_leaves_the_list_as_it_was(tmp_path: Path):
+    """A key function that raises stops the sort before any item moved, with CPython's exception. Agent proposal, not
+    owner-confirmed."""
+    _compare(tmp_path, KEY_RAISES, [["3,1,2"], ["3,0,2"], ["3,1,2,5"]])
+
+
+@pytest.mark.parametrize("body, reason", [
+    # the key is the name of a function or a one-parameter lambda
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=str.lower)\n    print(ys)\n", "key="),
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda a, b=1: a)\n    print(ys)\n", "one parameter"),
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda a: [a for a in xs])\n    print(ys)\n", "lambda"),
+    # the keys are int, float or str
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda v: (v, v))\n    print(ys)\n", "key"),
+    ("    xs = [1, 2]\n    ys = sorted(xs, key=lambda v: v > 1)\n    print(ys)\n", "key"),
+    # list.sort(key=...): CPython shows the key an empty list, which an item or a list name could reach
+    ("    xs = [1, 2]\n    zs = xs\n    xs.sort(key=lambda v: len(zs))\n    print(xs)\n", "empty"),
+    # min() / max() with a key, of items that have no placeholder
+    ("    xs = [[1], [2]]\n    m = min(xs, key=len)\n    print(m)\n", "min()"),
+])
+def test_what_a_key_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
+    found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
+    assert any(reason in r or reason in m for r, m in found), found

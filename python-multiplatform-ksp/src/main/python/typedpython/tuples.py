@@ -64,6 +64,8 @@ import ast
 import copy
 from dataclasses import dataclass, field
 
+from typedpython.comprehensions import KEYSORT
+
 ELEMENT_KINDS = ("int", "float", "bool", "str")
 LIST_ELEMENT_KINDS = ("int", "float", "str")    # (a list of tuples: one list per element; no list of bool yet)
 TUPLE_INDEX = "__tp_tuple_index"   # `t[i]`: TUPLE_INDEX(i, t__0, t__1, ...), lowered to ir.TupleIndex
@@ -1003,6 +1005,13 @@ class _Function:
                 key = lambda: copy.deepcopy(k)                                   # noqa: E731
             return out + [ast.Delete(targets=[ast.Subscript(value=c, slice=key(), ctx=ast.Del())])
                           for c in self.comps(name)]
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name) \
+                and s.value.func.id == KEYSORT and len(s.value.args) == 3 and isinstance(s.value.args[2], ast.Name) \
+                and s.value.args[2].id in self.lists:
+            # tier S2c: the keyed sort of a list of tuples moves every element list by the one order of the keys
+            keys, rev, lst = s.value.args
+            return [ast.Expr(value=ast.Call(func=_name(KEYSORT), args=[keys, rev, *self.comps(lst.id)],  # type: ignore[attr-defined]
+                                            keywords=[]))]
         if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Attribute) \
                 and isinstance(s.value.func.value, ast.Name) and s.value.func.value.id in self.lists:
             call = s.value

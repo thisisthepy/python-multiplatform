@@ -309,6 +309,11 @@ class _Pass(ast.NodeVisitor):
         self.loop_iterables = {id(i) for i in iters}
         self.reducers = {id(c) for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s)) is not None} \
             if isinstance(module.tree, ast.Module) else set()
+        # ... and the key= lambda of such a call, or of `xs.sort(key=...)` as a statement (comprehensions.py inlines it)
+        keyed = [c for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s)
+                                                       or comprehensions._keyed_sort_of(s)) is not None] \
+            if isinstance(module.tree, ast.Module) else []
+        self.key_lambdas = {id(k) for c in keyed if isinstance(k := comprehensions._key_of(c), ast.Lambda)}
         # (an iterable of such a call is the iterable of a loop too)
         self.loop_iterables |= {id(c.args[0]) for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s))
                                 is not None} if isinstance(module.tree, ast.Module) else set()
@@ -544,6 +549,9 @@ class _Pass(ast.NodeVisitor):
     # -- expressions
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
+        if id(node) in self.key_lambdas:
+            self.generic_visit(node)            # tier S2c: a key, inlined where the key is applied
+            return
         self.error("aot/closure", "lambda", node, "`lambda` makes a closure, which is outside the AOT subset")
         self.generic_visit(node)
 

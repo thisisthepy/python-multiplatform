@@ -188,6 +188,8 @@ class _Checker:
             if recv is not None:
                 return self.field_list_class.get((recv, e.attr))        # a list field
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+            if e.func.id == "sorted" and e.args and "sorted" not in self.shadow:
+                return self._infer_list_class(e.args[0])                # tier S2c: sorted(xs, key=k) of a list[C]
             return self.func_return_list_class.get(e.func.id)
         if isinstance(e, ast.List) and e.elts:
             found = {self._infer_expr_class(x) for x in e.elts}
@@ -208,6 +210,8 @@ class _Checker:
             if isinstance(e.func, ast.Name):
                 if e.func.id in self.class_names:
                     return e.func.id
+                if e.func.id in ("min", "max") and len(e.args) == 1 and e.func.id not in self.shadow:
+                    return self._infer_list_class(e.args[0])            # tier S2c: min(xs, key=k) of a list[C]
                 return self.func_return_class.get(e.func.id)
             if isinstance(e.func, ast.Attribute) and isinstance(e.func.value, ast.Name):
                 recv_cls = self.var_classes.get(e.func.value.id)
@@ -657,6 +661,34 @@ class _Checker:
             kind = type(e).__name__
             self.rep.error(e, "aot/expression", kind, f"a `{kind}` expression is outside the first AOT step")
 
+    def key_function(self, k: ast.expr, items: ast.expr | None) -> None:
+        """Tier S2c: the key= of sorted() / list.sort() / min() / max(): the name of a function (a program function
+        or a builtin the front end calls) or a lambda of one positional parameter, whose body is checked as an
+        expression with the parameter a local (an instance of the items' class when the items are a list[C])."""
+        if isinstance(k, ast.Name):
+            self.expr(k)
+            return
+        if not isinstance(k, ast.Lambda):
+            self.rep.error(k, "aot/keyword", "key", f"the key= `{ast.unparse(k)}` is outside the AOT mode (the name of a "
+                           "function, or a lambda of one parameter)")
+            return
+        a = k.args
+        if len(a.args) != 1 or a.posonlyargs or a.kwonlyargs or a.vararg or a.kwarg or a.defaults:
+            self.rep.error(k, "aot/keyword", "key", f"the key `{ast.unparse(k)}` is a lambda of one parameter in an AOT "
+                           "program (no default, no other parameter)")
+            return
+        name = a.args[0].arg
+        saved_shadow, saved_classes = self.shadow, dict(self.var_classes)
+        self.shadow = self.shadow | {name}
+        self.var_classes.pop(name, None)
+        cls = self._infer_list_class(items) if items is not None else None
+        if cls is not None:
+            self.var_classes[name] = cls
+        try:
+            self.expr(k.body)
+        finally:
+            self.shadow, self.var_classes = saved_shadow, saved_classes
+
     def list_display(self, e: ast.List) -> None:
         if not e.elts:
             self.rep.error(e, "aot/container", "list display", "an empty list display `[]` has no element type in the AOT "
@@ -702,9 +734,10 @@ class _Checker:
                 continue
             if ((isinstance(f, ast.Name) and f.id == "sorted" and "sorted" not in self.shadow)
                     or (isinstance(f, ast.Attribute) and f.attr == "sort")) and k.arg in ("reverse", "key"):
-                if k.arg == "key":            # tier S2c: sorted() / list.sort() without a key yet
-                    self.rep.error(k.value, "aot/keyword", "key", "sorted() and list.sort() take no key= in an AOT "
-                                                                 "program yet")
+                if k.arg == "key":            # tier S2c: a function's name or a one-parameter lambda
+                    items = c.args[0] if isinstance(f, ast.Name) and c.args else \
+                        f.value if isinstance(f, ast.Attribute) else None
+                    self.key_function(k.value, items)
                 else:
                     self.expr(k.value)
                 continue
@@ -718,6 +751,8 @@ class _Checker:
             if isinstance(f, ast.Name) and f.id in ("min", "max") and f.id not in self.shadow:
                 if k.arg == "default" and len(c.args) == 1:
                     self.expr(k.value)        # tier S2c: min(it, default=d) (comprehensions.py checks d)
+                elif k.arg == "key" and len(c.args) == 1:
+                    self.key_function(k.value, c.args[0])   # tier S2c: min(it, key=k)
                 else:
                     self.rep.error(k.value, "aot/keyword", k.arg or "**", f"{f.id}() takes no {k.arg}= in an AOT "
                                                                           "program yet")
