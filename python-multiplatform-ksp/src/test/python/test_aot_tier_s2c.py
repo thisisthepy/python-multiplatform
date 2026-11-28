@@ -421,8 +421,8 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     # a comprehension is the value of an assignment to a name or of a return
     ("    xs = [1, 2]\n    print([x for x in xs])\n", "bind it to a name"),
     ("    xs = [1, 2]\n    n = len([x for x in xs])\n    print(n)\n", "bind it to a name"),
-    # a generator expression is not a comprehension (no generators in an AOT program)
-    ("    xs = [1, 2]\n    print(sum(x for x in xs))\n", "generator expression"),
+    # a generator expression argument is the loop it means only where the call is bound to a name or returned
+    ("    xs = [1, 2]\n    print(sum(x for x in xs))\n", "value of an assignment"),
     # what the loop it means cannot hold is refused as that loop is
     ("    xs = [1, 2]\n    ys = [x > 1 for x in xs]\n    print(ys)\n", "list[bool]"),
     # a name bound inside it (`:=`) leaks to the enclosing scope in CPython; `:=` is outside the AOT mode anyway
@@ -456,7 +456,6 @@ MAIN = '\n\ndef main() -> None:\n    f()\n\n\nif __name__ == "__main__":\n    ma
     ("    xs = ['a']\n    s = sum(xs)\n    print(s)\n", "sum() of"),
     ("    xs = [1.5, 2.5]\n    s: float = sum(xs)\n    print(s)\n", "sum(xs, 0.0)"),
     ("    xs = [1, 2]\n    s = any(xs, xs)\n    print(s)\n", "one argument"),
-    ("    xs = [1, 2]\n    s = sum(x * 2 for x in xs)\n    print(s)\n", "generator expression"),
     # min() and max() of an iterable are bound to a name or returned; default= is a constant or a name
     # of the items' type
     ("    xs = [1, 2]\n    print(min(xs))\n", "bind it to a name"),
@@ -788,5 +787,63 @@ def test_a_key_that_raises_leaves_the_list_as_it_was(tmp_path: Path):
     ("    xs = [[1], [2]]\n    m = min(xs, key=len)\n    print(m)\n", "min()"),
 ])
 def test_what_a_key_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
+    found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
+    assert any(reason in r or reason in m for r, m in found), found
+
+
+GENS = """
+import sys
+
+
+def noisy(x: int) -> int:
+    print("item", x)
+    return x
+
+
+def total(xs: list[int]) -> int:
+    return sum(x for x in xs)
+
+
+def main() -> None:
+    xs = [int(t) for t in sys.argv[1].split(",")]
+    s = sum(x * 2 for x in xs if x != 3)
+    f = sum((x / 2 for x in xs), 0.0)
+    a = any(noisy(x) > 2 for x in xs)
+    b = all(noisy(x) < 4 for x in xs)
+    print(s, f, a, b, total(xs))
+    m = min(x * x for x in xs)
+    n = max((x - 1 for x in xs if x > 100), default=-1)
+    q = sum(i * j for i in range(3) for j in xs)
+    w = sorted(str(x) for x in xs)
+    print(m, n, q, w)
+    o = sorted((noisy(x) for x in xs), key=lambda v: -v)
+    print(o)
+    p = min((noisy(x) for x in xs), key=lambda v: noisy(v) % 3)
+    print(p)
+    e = max(noisy(x) for x in xs if x > 1000)
+    print(e)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def test_a_generator_expression_argument_is_the_loop_it_means(tmp_path: Path):
+    """A generator expression that is the argument of sum(), any(), all(), min(), max() or sorted() bound to a name or
+    returned (leader, 2026-11-28: accepted, laziness and the short-circuit kept): its first iterable is evaluated
+    first, then each item is computed when the call takes it, so any() and all() stop computing at the first true
+    (false) item, min() / max() take each key right after its item, and sorted() computes every item before any key;
+    an empty one still raises CPython's ValueError. Agent proposal, not owner-confirmed."""
+    _compare(tmp_path, GENS, [["1,5,3,2"], ["4"], ["2,2,9,1,0"]])
+
+
+@pytest.mark.parametrize("body, reason", [
+    # a generator expression is accepted only as the argument of such a call bound to a name or returned
+    ("    xs = [1, 2]\n    g = (x for x in xs)\n    print(g)\n", "generator"),
+    # CPython evaluates the iterable before the start
+    ("    xs = [1, 2]\n    s = sum(list(xs), len(xs))\n    print(s)\n", "start"),
+])
+def test_what_a_generator_argument_cannot_do_yet_is_refused_with_the_reason(tmp_path: Path, body: str, reason: str):
     found = _rules(tmp_path, "def f() -> None:\n" + body + MAIN)
     assert any(reason in r or reason in m for r, m in found), found

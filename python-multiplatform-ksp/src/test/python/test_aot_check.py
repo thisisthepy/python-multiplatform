@@ -55,7 +55,8 @@ TABLE = [
     # aot/generator
     ("aot/generator", "def f(n: int):\n    yield n\n", (ERR, None, "yield", 2)),
     ("aot/generator", "def f(n: int):\n    yield from n\n", (ERR, None, "yield from", 2)),
-    ("aot/generator", "def f(n: int) -> int:\n    return sum(i for i in range(n))\n", (ERR, None, "generator expression", 2)),
+    # (tier S2c: `return sum(i for i in range(n))` compiles, leader 2026-11-28; a generator held in a name does not)
+    ("aot/generator", "def f(n: int) -> int:\n    g = (i for i in range(n))\n    return 0\n", (ERR, None, "generator expression", 2)),
     # aot/async
     ("aot/async", "async def f() -> None:\n    pass\n", (ERR, None, "async def", 1)),
     ("aot/async", "async def f(x: int) -> int:\n    return await x\n", (ERR, None, "await", 2)),
@@ -260,6 +261,24 @@ def test_a_key_function_is_not_reported(tmp_path):
     got = sorted((f.line, f.rule, f.name) for f in report.findings)
     assert [(r, n) for _, r, n in got] == [("aot/closure", "lambda")], report.lines()
     assert got[0][0] == 10, report.lines()
+
+
+def test_a_generator_argument_of_a_placed_reducer_is_not_reported(tmp_path):
+    """Tier S2c (leader 2026-11-28): a generator expression that is the argument of sum() / any() / all() / min() /
+    max() / sorted() bound to a name or returned is the loop it means; a generator anywhere else is still reported."""
+    path = write(tmp_path, """
+        def f(xs: list[int]) -> int:
+            a = sum(x * 2 for x in xs if x)
+            b = any(x > 1 for x in xs)
+            c = sorted((x for x in xs), key=lambda v: -v)
+            d = max((x for x in xs), default=0)
+            g = (x for x in xs)
+            return a + int(b) + len(c) + d + len(list(g))
+    """)
+    report = aotcheck.check(path, front_end=False)
+    got = sorted((f.line, f.rule, f.name) for f in report.findings)
+    assert ("aot/generator", "generator expression") in [(r, n) for _, r, n in got], report.lines()
+    assert all(line == 6 for line, r, _ in got if r == "aot/generator"), report.lines()
 
 
 def test_the_view_types_of_collections_abc_are_not_reported(tmp_path):

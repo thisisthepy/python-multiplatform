@@ -40,11 +40,18 @@ whose key compares strictly smaller (larger). A keyed sort is what list_sort_imp
 the list's items, left to right, into a hidden list, then the marker statement `KEYSORT(keys, r, xs)`, which the
 lowering makes an `ir.ListSortKeyed` (the (key, position) pairs sorted by CPython's listsort, each list moved by the
 positions; tuples.py gives it every element list of a list of tuples). `xs.sort(key=k)` only where the key cannot reach
-`xs` (CPython shows the key an empty list): see `_list_keyed_sort`. A generator expression is not accepted (design: no generators in
-any tier), so `sum(x * 2 for x in xs)` stays refused.
+`xs` (CPython shows the key an empty list): see `_list_keyed_sort`.
+
+A generator expression that is the argument of such a call (leader, 2026-11-28: accepted, with laziness and the
+short-circuit kept) is the site's comprehension itself, `sum(x * 2 for x in xs if c)`: its first iterable is evaluated
+first, as the generator's creation evaluates it, and each item is computed when the loop reaches it, which is when the
+call would take it from the generator: any() / all() stop computing at the first true (false) item, min() / max()
+compute each item's key right after the item, sorted() computes every item before any key. sum(it, start) reads its
+start before the loop, so a start that is not a constant or a name is refused unless the iterable is a name (CPython
+evaluates the iterable first; this was a defect for any iterable before generators were accepted).
 
 Not rewritten, left for the lowering to refuse naming the reason: a comprehension anywhere else (an operand, an
-argument), a generator expression (aot/generator), an async comprehension; and refused here: `:=` inside one (it binds
+argument), a generator expression anywhere else (aot/generator), an async comprehension; and refused here: `:=` inside one (it binds
 a name of the enclosing function in CPython), a nested comprehension inside one.
 """
 from __future__ import annotations
@@ -102,7 +109,8 @@ def _reducer_of(s: ast.stmt) -> ast.Call | None:
     that is not a generator expression."""
     value = _value_of(s)
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in REDUCERS \
-            and value.args and not isinstance(value.args[0], (ast.GeneratorExp, ast.Starred)) \
+            and value.args and not isinstance(value.args[0], ast.Starred) \
+            and not (isinstance(value.args[0], ast.GeneratorExp) and any(g.is_async for g in value.args[0].generators)) \
             and not (value.func.id in ("min", "max", "sorted") and len(value.args) != 1):  # (min(a, b): an expression)
         return value
     return None
@@ -126,6 +134,23 @@ def _applied(key: ast.expr, arg: str) -> ast.expr:
     if isinstance(key, ast.Lambda):
         return _renamed(key.body, {key.args.args[0].arg: arg})              # type: ignore[return-value]
     return ast.Call(func=_renamed(key, {}), args=[ast.Name(id=arg, ctx=ast.Load())], keywords=[])
+
+
+class _Substitute(ast.NodeTransformer):
+    def __init__(self, name: str, value: ast.expr) -> None:
+        self.name, self.value = name, value
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        import copy
+        return copy.deepcopy(self.value) if node.id == self.name else node
+
+
+def _applied_to(key: ast.expr, value: ast.expr) -> ast.expr:
+    """The key applied to the expression `value` (only for the probe, which types it)."""
+    import copy
+    if isinstance(key, ast.Lambda):
+        return _Substitute(key.args.args[0].arg, value).visit(copy.deepcopy(key.body))   # type: ignore[return-value]
+    return ast.Call(func=copy.deepcopy(key), args=[copy.deepcopy(value)], keywords=[])
 
 
 def _check_key(key: ast.expr, line: int) -> None:
@@ -164,6 +189,8 @@ def sites(functions: list[tuple[str, ast.FunctionDef]]) -> list[Site]:
         for s in _own_statements(fn):
             if (c := _comp_of(s)) is not None:
                 out.append(Site(q, s, c))
+            elif (call := _reducer_of(s)) is not None and isinstance(call.args[0], ast.GeneratorExp):
+                out.append(Site(q, s, call.args[0], call))     # (leader 2026-11-28: the generator is the loop it means)
             elif (call := _reducer_of(s) or _keyed_sort_of(s)) is not None:
                 while True:
                     k += 1
@@ -207,10 +234,11 @@ def probe(probed: str, probes: list[rebinding.Probe], wanted: list[rebinding.Ass
             continue
         key = _key_of(site.call)
         applied = ""
-        if key is not None and isinstance(key, (ast.Name, ast.Lambda)) and len(names) == 1:
+        if key is not None and isinstance(key, (ast.Name, ast.Lambda)) \
+                and (len(names) == 1 or isinstance(site.comp, ast.GeneratorExp)):
             try:
                 _check_key(key, s.lineno)
-                applied = ast.unparse(_applied(key, names[0]))
+                applied = ast.unparse(_applied_to(key, site.comp.elt))             # type: ignore[union-attr]
             except _Problem:
                 applied = ""                        # (refused with its reason by the rewrite)
         head = "[(" + "".join(f"{n}, " for n in names)
@@ -334,6 +362,14 @@ def _rewrite_site(site: Site, fn: ast.FunctionDef, kinds: dict[str, list[tuple[i
             if len(call.args) + len(call.keywords) > 2 or any(k.arg != "start" for k in call.keywords) \
                     or (len(call.args) == 2 and call.keywords):
                 raise _Problem(line, "sum() takes an iterable and a start in an AOT program")
+            start = call.args[1] if len(call.args) == 2 else next((k.value for k in call.keywords), None)
+            first = comp.generators[0].iter
+            simple = lambda e: isinstance(e, (ast.Name, ast.Constant)) or (           # noqa: E731
+                isinstance(e, ast.UnaryOp) and isinstance(e.operand, ast.Constant))
+            if start is not None and not simple(start) and not simple(first):
+                # the loop reads the start before the iterable, CPython the iterable first
+                raise _Problem(line, f"`{ast.unparse(call)}`: CPython evaluates the iterable before the start; an AOT "
+                                     "program takes a start that is a constant or a name unless the iterable is a name")
         elif call.func.id == "sorted":                                      # type: ignore[attr-defined]
             for k in call.keywords:
                 if k.arg == "key":
@@ -618,8 +654,12 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
                                         keywords=[ast.keyword(arg="reverse", value=copy.deepcopy(reverse))]))]
         if key is not None:
             # the list built, then its keys, then the sort of the pairs (sorted() is list(it).sort(key=k))
-            v = site.comp.elt.id                                            # type: ignore[union-attr]
-            spelled = [k for ln, k in kinds.get(mapping[v], []) if ln == line]
+            if isinstance(site.comp.elt, ast.Name) and site.comp.elt.id in mapping:
+                spelled = [k for ln, k in kinds.get(mapping[site.comp.elt.id], []) if ln == line]
+            else:                                   # a generator's element: the item type of the list it builds
+                spelled = [ast.unparse(annotation.slice)] if isinstance(annotation, ast.Subscript) else []
+            if not spelled:
+                raise _Problem(line, f"`{ast.unparse(call)}`: no type is known for its items")
             tail = _keyed_tail(acc, key, key_type, copy.deepcopy(reverse), spelled[0], line, kinds, taken, counter,
                                site.qname)
     elif name in ("min", "max"):
@@ -646,10 +686,17 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
             kinds[kv] = [(line, key_type)]
             head.append(ast.AnnAssign(target=store(best), annotation=ast.Name(id=key_type, ctx=ast.Load()),
                                       value=ast.Constant(_ZERO[key_type]), simple=1))
-            v = site.comp.elt.id                                            # type: ignore[union-attr]
+            first_stmts: list[ast.stmt] = []
+            if isinstance(item, ast.Name):
+                held = item.id
+            else:                                   # a generator's element, computed once per item
+                held = _fresh("item", taken, counter, site.qname)
+                kinds[held] = [(line, ast.unparse(annotation))]
+                first_stmts = [assign(held, item)]
+                item = load(held)
             better = ast.Compare(left=load(kv), ops=[op], comparators=[load(best)])
             keep = [assign(acc, copy.deepcopy(item)), assign(best, load(kv))]
-            inner = [assign(kv, _applied(key, mapping[v])),
+            inner = [*first_stmts, assign(kv, _applied(key, held)),
                      ast.If(test=ast.UnaryOp(op=ast.Not(), operand=load(seen)),
                             body=[*copy.deepcopy(keep), assign(seen, ast.Constant(True))],
                             orelse=[ast.If(test=better, body=keep, orelse=[])])]
@@ -677,8 +724,8 @@ def _reduce(site: Site, call: ast.Call, annotation: ast.expr, acc: str,
             absolute = lambda e: ast.Call(func=load("abs"), args=[e], keywords=[])     # noqa: E731
             plus = lambda a, b: ast.BinOp(left=a, op=ast.Add(), right=b)              # noqa: E731
             minus = lambda a, b: ast.BinOp(left=a, op=ast.Sub(), right=b)             # noqa: E731
-            v = site.comp.elt.id                                            # type: ignore[union-attr]
-            spelled = [k for ln, k in kinds.get(mapping[v], []) if ln == line]
+            v = site.comp.elt.id if isinstance(site.comp.elt, ast.Name) else None   # type: ignore[union-attr]
+            spelled = [k for ln, k in kinds.get(mapping[v], []) if ln == line] if v in mapping else []
             # (an int item is converted as PyLong_AsDouble converts it; a float item is taken as it is)
             converted = item if spelled == ["float"] else ast.Call(func=load("float"), args=[item], keywords=[])
             inner = [assign(x, converted),

@@ -129,6 +129,7 @@ class _Checker:
                  field_class: dict[tuple[str, str], str] | None = None) -> None:
         self.p = program
         self.rep = rep
+        self.reduced_generators: set[int] = set()   # tier S2c: generators that are the argument of sum() ... sorted()
         self.arity = arity
         self.has_math = has_math
         self.has_sys = has_sys
@@ -647,7 +648,8 @@ class _Checker:
             self.subscript(e)
         elif isinstance(e, ast.Lambda):
             self.rep.error(e, "aot/expression", "lambda", "a lambda is outside the first AOT step")
-        elif isinstance(e, (ast.ListComp, ast.SetComp, ast.DictComp)):
+        elif isinstance(e, (ast.ListComp, ast.SetComp, ast.DictComp)) or (isinstance(e, ast.GeneratorExp)
+                                                                          and id(e) in self.reduced_generators):
             for g in e.generators:          # tier S2c: each clause is the loop it means (the front end checks the rest)
                 self.for_stmt(ast.copy_location(ast.For(target=g.target, iter=g.iter, body=[], orelse=[]), e))
                 for c in g.ifs:
@@ -784,7 +786,11 @@ class _Checker:
             elif n == "abs":
                 if len(c.args) != 1:
                     self.rep.error(c, "aot/call", n, "abs() takes one argument")
-            elif n in ("min", "max") and len(c.args) == 1 and not isinstance(c.args[0], ast.GeneratorExp):
+            elif n in ("min", "max") and len(c.args) == 1 and isinstance(c.args[0], ast.GeneratorExp):
+                self.reduced_generators.add(id(c.args[0]))    # tier S2c: the loop the generator means (leader 2026-11-28)
+                self.expr(c.args[0])
+                return
+            elif n in ("min", "max") and len(c.args) == 1:
                 # tier S2c: of an iterable (typedpython/comprehensions.py; the front end checks the place)
                 self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
                                                         body=[], orelse=[]), c))
@@ -856,6 +862,7 @@ class _Checker:
                     self.for_stmt(ast.copy_location(ast.For(target=ast.Name(id="_", ctx=ast.Store()), iter=c.args[0],
                                                             body=[], orelse=[]), c))
                 else:
+                    self.reduced_generators.add(id(c.args[0]))  # tier S2c: the loop it means (leader 2026-11-28)
                     self.expr(c.args[0])
                 for a in c.args[1:]:
                     self.expr(a)

@@ -565,9 +565,13 @@ this rewrite: a `raise` of the program stays refused); with `default=d` an empty
 proposal, not confirmed; `d` a constant or a name of the items' type, since the loop reads it before the iterable);
 with `key=k` each item's key is computed as the item is read, and the item kept with its key is replaced by one whose
 key compares strictly smaller (larger), as `min_max` does (agent proposal, not confirmed; items of int, float, str,
-bool or tuples of them, keys of those types). A generator expression argument stays refused (generators are outside
-every tier, section 4; the leader accepted them on 2026-11-28, rewritten into the loop with laziness and the
-short-circuit of any() and all() kept, which is the next step). Then `zip` and `reversed` of other iterables, range
+bool or tuples of them, keys of those types). A generator expression as the argument of such a call is
+the loop it means (leader, 2026-11-28: "accept them as the argument of sum/any/all/min/max/sorted, rewritten into the
+loop, as long as Python semantics (laziness, short-circuit for any/all) are preserved"): its first iterable is
+evaluated first, each item is computed when the call would take it, so any() and all() stop computing at the first
+true (false) item; a generator anywhere else stays refused (section 4). `sum(it, start)` with a start that is not a
+constant or a name is refused unless the iterable is a name, since the loop reads the start first and CPython the
+iterable first (a defect found here, for every iterable). Then `zip` and `reversed` of other iterables, range
 objects passed and indexed, in `for` loops and comprehensions. `sorted(it, key=k)` and `xs.sort(key=k)` are in
 (agent proposal, not confirmed): `k` is the name of a function or a lambda of one parameter, inlined where the key
 is applied (its body binds nothing and makes no function). As `list_sort_impl` does, `reverse` is evaluated first,

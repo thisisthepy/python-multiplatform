@@ -313,6 +313,9 @@ class _Pass(ast.NodeVisitor):
         keyed = [c for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s)
                                                        or comprehensions._keyed_sort_of(s)) is not None] \
             if isinstance(module.tree, ast.Module) else []
+        self.reduced_generators = {id(c.args[0]) for c in keyed if c.args and isinstance(c.args[0], ast.GeneratorExp)}
+        self.loop_iterables |= {id(g.iter) for c in keyed if c.args and isinstance(c.args[0], ast.GeneratorExp)
+                                for g in c.args[0].generators}
         self.key_lambdas = {id(k) for c in keyed if isinstance(k := comprehensions._key_of(c), ast.Lambda)}
         # (an iterable of such a call is the iterable of a loop too)
         self.loop_iterables |= {id(c.args[0]) for s in ast.walk(module.tree) if (c := comprehensions._reducer_of(s))
@@ -573,6 +576,10 @@ class _Pass(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        if id(node) in self.reduced_generators:
+            # tier S2c: the argument of a placed sum() ... sorted(), the loop it means (leader 2026-11-28)
+            self.comprehension(node, "generator expression")
+            return
         self.error("aot/generator", "generator expression", node, "a generator expression is lazy, which is outside the AOT subset")
         self.comprehension(node, "generator expression")
 
